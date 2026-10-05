@@ -19,37 +19,41 @@ environment:
       mobility_predator: 0.0
       visibility_prey: 0.0
       visibility_predator: 0.0
+      resource_productivity: 0.0
     rock:
       color: [80, 80, 80]
       resource_regen_rate: 0.0
       resource_capacity: 0
       passable: true
-      mobility_prey: 0.5
-      mobility_predator: 0.3
+      mobility_prey: 0.2
+      mobility_predator: 0.25
       visibility_prey: 1.0
       visibility_predator: 1.0
+      resource_productivity: 0.0
     plains:
       color: [180, 200, 100]
       resource_regen_rate: 1.5
-      resource_capacity: 30
+      resource_capacity: 14
       passable: true
       mobility_prey: 1.0
       mobility_predator: 1.0
       visibility_prey: 1.0
       visibility_predator: 1.0
+      resource_productivity: 1.0
     forest:
       color: [60, 140, 60]
       resource_regen_rate: 0.5
-      resource_capacity: 150
+      resource_capacity: 70
       passable: true
-      mobility_prey: 0.5
-      mobility_predator: 0.75
+      mobility_prey: 0.6
+      mobility_predator: 0.7
       visibility_prey: 0.4
       visibility_predator: 0.6
+      resource_productivity: 0.333
   terrain_distribution:
-    rock: 0.15
-    plains: 0.30
-    forest: 0.55
+    rock: 0.10
+    plains: 0.32
+    forest: 0.62
   resource_diffusion_rate: 0.1
   regen_base_factor: 0.025
   depletion_threshold: 0.6
@@ -61,6 +65,11 @@ grazer:
   initial_count: 200
   max_energy: 1000
   energy_per_step: 5
+  # Intake is planned as energy_from_resource * efficiency, but consume_resource
+  # can only take what the cell holds. With plains capacity down to 14 a grazer
+  # asking for 18 units on a half-depleted cell was capped at 7 and starved.
+  # 18 still keeps the worst-case floor (18 * min_efficiency = 5.4) above the
+  # metabolic cost of 5, which is what stops prey being stranded on bare ground.
   energy_from_resource: 18
   reproduction_min_age: 55
   reproduction_min_energy: 650
@@ -83,12 +92,15 @@ grazer:
 rabbit:
   initial_count: 100
   max_energy: 400
-  energy_per_step: 3
-  energy_from_resource: 12
-  reproduction_min_age: 35
-  reproduction_min_energy: 240
-  reproduction_energy_cost: 0.25
-  offspring_initial_energy: 140
+  # Metabolism must exceed the best intake available while travelling, otherwise
+  # rabbits never need to stop. Travelling yield peaks at
+  # energy_from_resource * moving_efficiency = 6 * 0.25 = 1.5 < 5.
+  energy_per_step: 5
+  energy_from_resource: 6
+  reproduction_min_age: 60
+  reproduction_min_energy: 300
+  reproduction_energy_cost: 0.35
+  offspring_initial_energy: 120
   move_speed: 1
   gradient_weight: 0.9
   gradient_weight_std: 0.1
@@ -102,16 +114,27 @@ rabbit:
   flee_radius: 5
   flee_weight: 3.0
   min_efficiency: 0.3
+  migratory: true
+  moving_efficiency: 0.25
+  grazing_efficiency: 4.0
+  graze_ratio_threshold: 0.45
+  migrate_ratio_threshold: 0.12
+  graze_energy_target: 0.85
+  wander_energy_threshold: 0.95
+  movement_energy_cost: 0.6
+  flee_speed_multiplier: 1.3
+  flee_cost_multiplier: 2.5
+  grazing_move_multiplier: 0.667
 
 predator:
   initial_count: 30
   max_energy: 800
   energy_per_step: 6
   energy_from_prey: 260
-  reproduction_min_age: 110
-  reproduction_min_energy: 420
-  reproduction_energy_cost: 0.4
-  offspring_initial_energy: 140
+  reproduction_min_age: 70
+  reproduction_min_energy: 200
+  reproduction_energy_cost: 0.25
+  offspring_initial_energy: 160
   move_speed: 2
   chase_radius: 7
   resource_sense_radius: 10
@@ -124,12 +147,20 @@ predator:
   investigate_steps: 12
   investigate_threshold: 0.02
   vision_boost_on_investigate: 1.5
+  movement_energy_cost: 0.6
+  # Failed chases are what starved predators, not failed hunts: at 2.0 a
+  # fruitless pursuit burned ~440 energy, over half a predator's body, while a
+  # successful rabbit netted only ~70.
+  chase_speed_multiplier: 1.2
+  chase_cost_multiplier: 1.4
 
 carcass:
   decay_rate: 0.98
   min_energy: 1.0
   carcass_energy_fraction: 1.0
-  consumption_divisor: 8.0
+  # Lower divisor means a carcass is drained in fewer steps, so a kill is cashed
+  # in at roughly half the metabolic burn of sitting on it.
+  consumption_divisor: 4.0
   feed_radius: 1
 
 visualization:
@@ -137,13 +168,14 @@ visualization:
   show_grid: true
   show_stats: true
   fps: 60
-  window_width: 1024
+  window_width: 1404
   window_height: 768
   colors:
     grazer: [255, 255, 0]
     predator: [255, 100, 0]
     carcass: [255, 0, 0]
     rabbit: [255, 0, 255]
+    carcass_outline: [255, 220, 220]
     resource_low: [30, 30, 30]
     resource_high: [50, 255, 50]
 

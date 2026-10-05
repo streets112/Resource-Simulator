@@ -121,11 +121,34 @@ def test_prey_consumption_actually_depletes_resources(config, sim):
 
 
 def test_efficiency_has_a_floor_but_still_outlives_metabolism(config):
-    """Worst-case intake must exceed metabolic cost or prey can never recover."""
+    """Prey must be able to out-earn metabolism somewhere, or they cannot recover.
+
+    For a continuous grazer that means the worst-case (stripped cell) intake has
+    to clear the metabolic cost. For a migratory species the invariant is
+    different and stricter in two parts: travelling must *not* cover metabolism
+    (otherwise it never needs to stop) and grazing must comfortably exceed it.
+    """
     for name in ("grazer", "rabbit"):
         cfg = getattr(config, name)
         floor_gain = cfg.energy_from_resource * cfg.min_efficiency
-        assert floor_gain > cfg.energy_per_step, f"{name} starves in depleted terrain"
+        grazing_gain = cfg.energy_from_resource * cfg.grazing_efficiency
+
+        if not cfg.migratory:
+            assert floor_gain > cfg.energy_per_step, (
+                f"{name} starves in depleted terrain: floor {floor_gain:.2f} "
+                f"<= cost {cfg.energy_per_step}"
+            )
+            continue
+
+        travel_peak = cfg.energy_from_resource * cfg.moving_efficiency
+        assert travel_peak < cfg.energy_per_step, (
+            f"{name} can fund travel and would never need to stop: "
+            f"peak {travel_peak:.2f} >= cost {cfg.energy_per_step}"
+        )
+        assert grazing_gain > cfg.energy_per_step * 2, (
+            f"{name} cannot refill while standing: grazing {grazing_gain:.2f} "
+            f"vs cost {cfg.energy_per_step}"
+        )
 
 
 # ------------------------------------------------------------------- predation
@@ -198,7 +221,17 @@ def test_more_predators_strip_a_carcass_faster(config, sim):
 def test_carcass_feeding_is_oldest_first(config, sim):
     clear_agents(sim)
     place_plain(sim, 90, 90)
-    sim.grazers.append(Grazer(x=90.0, y=90.0, energy=40.0, config=config.grazer))
+
+    # Size the carcass relative to one feeding draw so the test does not depend
+    # on a hard-coded divisor: exactly one full draw plus a small remainder.
+    draw = config.predator.energy_from_prey / config.carcass.consumption_divisor
+    remainder = 5.0
+    carcass_energy = draw + remainder
+
+    sim.grazers.append(
+        Grazer(x=90.0, y=90.0, energy=carcass_energy / config.carcass.carcass_energy_fraction,
+               config=config.grazer)
+    )
     pack = []
     for idx, (dy, dx) in enumerate([(0, 0), (-1, -1), (-1, 0)]):
         predator = Predator(
@@ -212,11 +245,9 @@ def test_carcass_feeding_is_oldest_first(config, sim):
 
     sim._feed_on_carcasses()
 
-    # Scarce carcass: the oldest takes the full draw, the next the remainder.
-    assert pack[0].energy == pytest.approx(
-        config.predator.energy_from_prey / config.carcass.consumption_divisor
-    )
-    assert pack[1].energy > 0.0
+    # Oldest takes a full draw, the next the remainder, the youngest nothing.
+    assert pack[0].energy == pytest.approx(draw)
+    assert pack[1].energy == pytest.approx(remainder)
     assert pack[2].energy == 0.0
 
 

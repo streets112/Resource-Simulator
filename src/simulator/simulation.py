@@ -209,6 +209,15 @@ class Simulation:
         for _ in range(self.config.predator.initial_count):
             self._add_predator()
 
+    def _spawn_age(self, cfg) -> int:
+        """Starting age drawn uniformly from 0 to maturity.
+
+        Seeding every individual as newborn synchronises the whole population's
+        first reproduction wave and its first mortality wave, which produces
+        artificial boom-bust cycles that have nothing to do with the model.
+        """
+        return int(self.rng.integers(0, int(cfg.reproduction_min_age) + 1))
+
     def _add_grazer(self, y: int | None = None, x: int | None = None) -> Grazer:
         cfg = self.config.grazer
         if y is None or x is None:
@@ -219,6 +228,7 @@ class Simulation:
             y=float(y),
             energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
             config=cfg,
+            age=self._spawn_age(cfg),
             gradient_weight=weight,
             inherited_gradient_weight=weight,
         )
@@ -235,6 +245,7 @@ class Simulation:
             y=float(y),
             energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
             config=cfg,
+            age=self._spawn_age(cfg),
             gradient_weight=weight,
             inherited_gradient_weight=weight,
         )
@@ -250,6 +261,7 @@ class Simulation:
             y=float(y),
             energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
             config=cfg,
+            age=self._spawn_age(cfg),
         )
         self.predators.append(predator)
         return predator
@@ -301,6 +313,32 @@ class Simulation:
 
     # ------------------------------------------------------------------ prey
 
+    def _foraging_state(self, prey, cfg) -> str:
+        """Decide whether this prey travels or stops to feed.
+
+        Travelling always costs more energy than it can gather, so a prey can
+        only make progress by standing still somewhere worth standing. It
+        therefore runs down local food, then moves on, and only stops when it
+        finds a cell good enough to justify the metabolic cost of staying.
+        """
+        if not cfg.migratory:
+            return "grazing"
+
+        ratio = self.env.get_resource_ratio(int(prey.y), int(prey.x))
+        energy_ratio = prey.energy_ratio
+
+        if prey.foraging_state == "grazing":
+            # Stay only while this cell is still worth feeding on and we are not
+            # yet full; otherwise it is time to move on.
+            if ratio <= cfg.migrate_ratio_threshold or energy_ratio >= cfg.wander_energy_threshold:
+                return "migrating"
+            return "grazing"
+
+        # Travelling: stop where food is good and we still need to refuel.
+        if ratio >= cfg.graze_ratio_threshold and energy_ratio < cfg.graze_energy_target:
+            return "grazing"
+        return "migrating"
+
     def _update_prey(self, flock: list, cfg, kind: str) -> None:
         for prey in flock:
             if not prey.alive:
@@ -314,9 +352,27 @@ class Simulation:
             if not prey.alive:
                 continue
 
+            state = self._foraging_state(prey, cfg)
+
+            if cfg.migratory:
+                prey.foraging_state = state
+                if state == "grazing":
+                    # Standing still: feed hard, do not move.
+                    prey.eat(self.env, cfg.grazing_efficiency)
+                    continue
+                # Travelling: feed on the move, at a rate that cannot cover
+                # metabolism, so the journey costs energy.
+                prey.eat(self.env, cfg.moving_efficiency)
+                herd = self._herd_vectors(prey, self._prey_index, cfg)
+                target = self._forage_target(prey, cfg)
+                if self._move_prey(prey, cfg, herd, target):
+                    self._record_death(kind)
+                continue
+
             herd = self._herd_vectors(prey, self._prey_index, cfg)
             target = self._forage_target(prey, cfg)
-            self._move_prey(prey, cfg, herd, target)
+            if self._move_prey(prey, cfg, herd, target):
+                self._record_death(kind)
             prey.eat(self.env)
 
     def _herd_vectors(self, prey, index: _SpatialIndex, cfg) -> tuple | None:
@@ -378,8 +434,9 @@ class Simulation:
         reachable = self.env.passable[y0:y1, x0:x1]
         score = np.where(reachable, window, -np.inf)
 
-        # Well-fed prey can afford to prospect away from rich ground.
-        if prey.energy_ratio > 0.8:
+        # Well-fed prey can afford to prospect away from rich ground, but a
+        # migratory species is looking for food, so prospecting is counterproductive.
+        if prey.energy_ratio > 0.8 and not cfg.migratory:
             score = score + np.where(reachable, (1.0 - window) * 0.3, 0.0)
 
         rows, cols = np.indices(score.shape)
@@ -412,10 +469,22 @@ class Simulation:
             found = True
         return (away_y, away_x) if found else None
 
-    def _move_prey(self, prey, cfg, herd: tuple | None, target: tuple[int, int]) -> None:
+    def _move_prey(self, prey, cfg, herd: tuple | None, target: tuple[int, int]) -> bool:
+        """Advance a prey. Returns True if the movement cost starved it.
+
+        Terrain mobility decides how many frames a cell takes to cross, and the
+        behavioural multipliers modulate both speed and its price: fleeing is
+        1.3x faster at 2.5x the movement metabolism, and a continuous grazer
+        shuffling along while feeding moves at two thirds speed.
+        """
         py, px = int(prey.y), int(prey.x)
-        mobility = self.env.mobility_prey[py, px]
-        steps = max(1, int(prey.move_speed * mobility))
+        threat = self._threat_vector(prey, cfg.flee_radius)
+        fleeing = threat is not None
+
+        speed_multiplier = cfg.flee_speed_multiplier if fleeing else 1.0
+        if not cfg.migratory:
+            speed_multiplier *= cfg.grazing_move_multiplier
+        cost_multiplier = cfg.flee_cost_multiplier if fleeing else 1.0
 
         herd_weighted = None
         if herd is not None and self.rng.random() < cfg.herd_follow_chance:
@@ -427,9 +496,12 @@ class Simulation:
             )
 
         gradient_bias = float(np.clip(prey.gradient_weight, 0.0, 1.0))
-        threat = self._threat_vector(prey, cfg.flee_radius)
 
-        for _ in range(steps):
+        mobility = self.env.mobility_prey[py, px]
+        allowance = prey.movement_allowance(mobility * speed_multiplier)
+        moved = 0
+
+        for _ in range(allowance):
             ty, tx = target
             current_to_target = self.distance(py, px, ty, tx)
             best = None
@@ -479,6 +551,14 @@ class Simulation:
             prey.y = float(ny)
             prey.record_move(moved_y, moved_x)
             py, px = ny, nx
+            moved += 1
+
+        prey.energy -= moved * cfg.movement_energy_cost * cost_multiplier
+        if prey.energy <= 0:
+            prey.energy = 0.0
+            prey.alive = False
+            return True
+        return False
 
     # -------------------------------------------------------------- predators
 
@@ -614,13 +694,13 @@ class Simulation:
                     int(target.y),
                     int(target.x),
                 )
-                self._move_predator_toward(predator, goal[0], goal[1])
+                self._move_predator_toward(predator, goal[0], goal[1], chasing=True)
                 return
 
         if mode == "solo":
             target = self._solo_target(predator)
             if target is not None:
-                self._move_predator_toward(predator, int(target.y), int(target.x))
+                self._move_predator_toward(predator, int(target.y), int(target.x), chasing=True)
                 return
 
         # No prey in sight: infer their presence from stripped ground.
@@ -746,12 +826,20 @@ class Simulation:
         )
         return True
 
-    def _move_predator_toward(self, predator: Predator, ty: int, tx: int) -> None:
+    def _move_predator_toward(
+        self, predator: Predator, ty: int, tx: int, chasing: bool = False
+    ) -> None:
+        """Advance toward a goal. Chasing costs double movement metabolism."""
+        cfg = self.config.predator
         py, px = int(predator.y), int(predator.x)
         mobility = self.env.mobility_predator[py, px]
-        steps = max(1, int(predator.move_speed * mobility))
 
-        for _ in range(steps):
+        speed = cfg.chase_speed_multiplier if chasing else 1.0
+        cost = cfg.chase_cost_multiplier if chasing else 1.0
+        allowance = predator.movement_allowance(mobility * speed)
+        moved = 0
+
+        for _ in range(allowance):
             gap = self.distance(py, px, ty, tx)
             if gap == 0:
                 break
@@ -776,11 +864,17 @@ class Simulation:
             predator.x = float(best[1])
             predator.record_move(moved_y, moved_x)
             py, px = best
+            moved += 1
+
+        predator.energy -= moved * cfg.movement_energy_cost * cost
+        if predator.energy <= 0:
+            predator.energy = 0.0
+            predator.alive = False
 
     def _predator_wander(self, predator: Predator) -> None:
         py, px = int(predator.y), int(predator.x)
         mobility = self.env.mobility_predator[py, px]
-        steps = max(1, int(predator.move_speed * mobility))
+        steps = predator.movement_allowance(mobility)
 
         for _ in range(steps):
             best = None

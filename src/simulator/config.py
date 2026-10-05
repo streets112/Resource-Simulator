@@ -26,6 +26,8 @@ class TerrainConfig:
     mobility_predator: float = 1.0
     visibility_prey: float = 1.0
     visibility_predator: float = 1.0
+    # Fraction of the post-metabolism surplus a prey actually banks here.
+    resource_productivity: float = 1.0
 
 
 @dataclass
@@ -65,6 +67,23 @@ class PreyConfig:
     flee_weight: float = 3.0
     min_efficiency: float = 0.3
 
+    # Stop-and-go foraging. When migratory is set, the species alternates between
+    # travelling (moving while feeding at a reduced rate) and standing still to
+    # feed heavily, instead of grazing continuously as it walks.
+    migratory: bool = False
+    moving_efficiency: float = 0.25
+    grazing_efficiency: float = 2.5
+    graze_ratio_threshold: float = 0.45
+    migrate_ratio_threshold: float = 0.12
+    graze_energy_target: float = 0.85
+    wander_energy_threshold: float = 0.95
+
+    # Movement metabolism, charged per cell advanced on top of energy_per_step.
+    movement_energy_cost: float = 0.6
+    flee_speed_multiplier: float = 1.3
+    flee_cost_multiplier: float = 2.5
+    grazing_move_multiplier: float = 0.667
+
 
 @dataclass
 class GrazerConfig(PreyConfig):
@@ -98,6 +117,9 @@ class PredatorConfig:
     investigate_steps: int = 12
     investigate_threshold: float = 0.02
     vision_boost_on_investigate: float = 1.5
+    movement_energy_cost: float = 0.6
+    chase_speed_multiplier: float = 1.2
+    chase_cost_multiplier: float = 2.0
 
 
 @dataclass

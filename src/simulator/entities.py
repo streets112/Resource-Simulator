@@ -21,6 +21,7 @@ class Entity:
     id: int = field(default_factory=lambda: next(_IDS))
     last_dy: int = 0
     last_dx: int = 0
+    move_budget: float = 0.0
 
     @property
     def max_energy(self) -> float:
@@ -52,6 +53,21 @@ class Entity:
         self.last_dy = dy
         self.last_dx = dx
 
+    def movement_allowance(self, mobility: float) -> int:
+        """Cells to advance this step, carrying the fractional remainder.
+
+        Rounding each step to a whole number of cells with a floor of 1 makes
+        terrain mobility meaningless for slow-moving species: a grazer with
+        move_speed 1 on rock (mobility 0.5) computed max(1, int(0.5)) == 1, so it
+        moved exactly as fast on rock as on plains. Accumulating the budget
+        instead makes rock genuinely cost time -- one cell every two steps --
+        which is what lets ridges channel movement while staying passable.
+        """
+        self.move_budget += self.move_speed * mobility
+        steps = int(self.move_budget)
+        self.move_budget -= steps
+        return steps
+
 
 @dataclass
 class Prey(Entity):
@@ -60,6 +76,7 @@ class Prey(Entity):
     gradient_weight: float = 0.7
     inherited_gradient_weight: float = 0.7
     vision_radius: int = 5
+    foraging_state: str = "migrating"
 
     @property
     def vision(self) -> int:
@@ -70,20 +87,39 @@ class Prey(Entity):
         self.gradient_weight = rng.normal(self.inherited_gradient_weight, std)
         self.gradient_weight = float(min(1.0, max(0.0, self.gradient_weight)))
 
-    def eat(self, env: HasResourceField) -> float:
+    def eat(self, env: HasResourceField, efficiency_scale: float = 1.0) -> float:
         """SPECIFICATION.md resource consumption.
 
-        efficiency = max(min_efficiency, resource_ratio)
+        efficiency = max(min_efficiency, resource_ratio) * efficiency_scale
         eaten      = consume_resource(y, x, energy_from_resource * efficiency)
         energy    <- min(max_energy, energy + eaten)
+
+        efficiency_scale lets a species feed at a reduced rate while travelling
+        and a high rate while standing still, which is what turns continuous
+        grazing into stop-and-go foraging.
+
+        Terrain productivity then taxes whatever is left after metabolism:
+        net = (intake - metabolism) * productivity, so plains banks the whole
+        surplus and forest only a third of it. The intake formula itself is
+        unchanged, which keeps the documented consumption model intact.
         """
         y, x = int(self.y), int(self.x)
         ratio = env.get_resource_ratio(y, x)
         if ratio <= 0:
             return 0.0
-        efficiency = max(float(self.config.min_efficiency), ratio)
+        efficiency = max(float(self.config.min_efficiency), ratio) * efficiency_scale
         taken = env.consume_resource(y, x, float(self.config.energy_from_resource) * efficiency)
-        return self.add_energy(taken)
+        gained = self.add_energy(taken)
+
+        productivity = getattr(env, "productivity", None)
+        if productivity is not None:
+            share = productivity(y, x)
+            if share < 1.0:
+                surplus = gained - float(self.config.energy_per_step)
+                if surplus > 0.0:
+                    gained -= surplus * (1.0 - share)
+                    self.energy = max(0.0, self.energy - surplus * (1.0 - share))
+        return gained
 
 
 @dataclass

@@ -148,6 +148,27 @@ class MainRenderer:
     ZOOM_STEP = 1.15
     BRUSHES = ("rock", "plains", "forest")
 
+    # The map occupies the left of the window; the right-hand sidebar holds the
+    # population chart with the metrics beneath it. The map viewport is the full
+    # window minus this width, so no panel ever overlaps the world.
+    SIDEBAR_WIDTH = 380
+    SIDEBAR_MARGIN = 10
+
+    # Cell encoding switches at this zoom. Below it a cell is too small for four
+    # quadrants to carry information (at fit-to-window zoom a whole cell is
+    # under 4px), so terrain becomes the hue and resource level the brightness.
+    # Above it the documented 4x4 quadrant layout becomes legible.
+    QUADRANT_MIN_ZOOM = 1.5
+
+    # Resource brightness range for the overview encoding, as a fraction of the
+    # terrain colour. Kept above zero so depleted ground stays readable as its
+    # terrain rather than going black.
+    OVERVIEW_MIN_BRIGHTNESS = 0.32
+
+    @property
+    def quadrant_mode(self) -> bool:
+        return self.zoom >= self.QUADRANT_MIN_ZOOM
+
     # Zoomed-in full-map scaling is cached until the zoom changes. Beyond this
     # pixel budget the scaled copy would be huge, so only the visible window is
     # resampled per frame instead.
@@ -194,8 +215,9 @@ class MainRenderer:
         self.chart = PopulationChart(10, 10, 400, 260)
         self.fps = self.vis.fps or 60
 
-        # Actual drawable area; kept in sync with the window on resize.
-        self.view_w = max(1, int(self.vis.window_width))
+        # Map viewport: the window minus the right-hand sidebar. The sidebar is
+        # never drawn over the world because it lives outside these bounds.
+        self.view_w = max(1, int(self.vis.window_width) - self.SIDEBAR_WIDTH)
         self.view_h = max(1, int(self.vis.window_height))
 
         # --- cached terrain+resource layer -----------------------------------
@@ -231,6 +253,27 @@ class MainRenderer:
         self._invalidate_scale_cache()
         if self.screen is None:
             self.initialize()
+        self.fit_view()
+
+    def fit_view(self) -> None:
+        """Centre the camera on the map and zoom so the whole world is visible.
+
+        Without this the camera sits at the world origin, which projects the
+        map's top-left corner to the centre of the window, and a zoom of 1.0
+        shows only 128 of 200 columns in a 1024px window.
+        """
+        if self.sim is None:
+            return
+        self.camera_x = self.sim.map_width * 0.5
+        self.camera_y = self.sim.map_height * 0.5
+
+        world_w = self.sim.map_width * self.vis.cell_size
+        world_h = self.sim.map_height * self.vis.cell_size
+        if world_w <= 0 or world_h <= 0:
+            return
+        fit = min(self.view_w / world_w, self.view_h / world_h)
+        self.zoom = float(np.clip(fit, self.MIN_ZOOM, self.MAX_ZOOM))
+        self._invalidate_scale_cache()
 
     def initialize(self) -> None:
         if not PYGAME_AVAILABLE:
@@ -268,18 +311,40 @@ class MainRenderer:
                 size = None
         if size is None:
             size = (int(self.vis.window_width), int(self.vis.window_height))
-        self.view_w = max(1, int(size[0]))
-        self.view_h = max(1, int(size[1]))
-        self.vis.window_width = self.view_w
-        self.vis.window_height = self.view_h
+
+        # window_width/height stay the true window size; the map viewport is
+        # what remains after reserving the sidebar.
+        self.vis.window_width = max(1, int(size[0]))
+        self.vis.window_height = max(1, int(size[1]))
+        self.view_w = max(1, self.vis.window_width - self.SIDEBAR_WIDTH)
+        self.view_h = self.vis.window_height
         self._place_chart()
 
+    def _sidebar_rect(self) -> pygame.Rect:
+        return pygame.Rect(
+            self.view_w, 0, self.vis.window_width - self.view_w, self.vis.window_height
+        )
+
+    def _draw_sidebar_background(self) -> None:
+        """Distinct panel so the map area reads as separate from the sidebar."""
+        if self.screen is None:
+            return
+        rect = self._sidebar_rect()
+        pygame.draw.rect(self.screen, (16, 16, 24), rect)
+        pygame.draw.line(
+            self.screen,
+            (55, 55, 75),
+            (rect.x, 0),
+            (rect.x, self.vis.window_height),
+            1,
+        )
+
     def _place_chart(self) -> None:
-        margin = 10
-        width = _clamp_int(400, margin, max(margin, self.view_w - 2 * margin))
-        height = _clamp_int(260, margin, max(margin, self.view_h - 2 * margin))
-        x = _clamp_int(self.view_w - width - margin, margin, max(margin, self.view_w - margin))
-        self.chart.set_bounds(x, margin, width, height)
+        margin = self.SIDEBAR_MARGIN
+        sidebar = self._sidebar_rect()
+        width = _clamp_int(sidebar.width - 2 * margin, margin, max(margin, sidebar.width - margin))
+        height = _clamp_int(260, margin, max(margin, sidebar.height - 2 * margin))
+        self.chart.set_bounds(sidebar.x + margin, margin, width, height)
 
     def _cell_pixels(self) -> float:
         """Screen pixels spanned by one world cell at the current zoom."""
@@ -404,7 +469,7 @@ class MainRenderer:
         elif key == pygame.K_t:
             self.show_carcasses = not self.show_carcasses
         elif key == pygame.K_0:
-            self.zoom, self.camera_x, self.camera_y = 1.0, 0.0, 0.0
+            self.fit_view()
         elif wants_plus:
             # ctrl disambiguates keyboard zoom from the creator brush size.
             if ctrl:
@@ -460,6 +525,9 @@ class MainRenderer:
 
     def _cell_at(self, screen_x: int, screen_y: int) -> tuple[int, int] | None:
         if self.sim is None:
+            return None
+        # Clicks in the sidebar are not map interactions.
+        if screen_x >= self.view_w or screen_y >= self.view_h:
             return None
         wx, wy = self._screen_to_world(screen_x, screen_y)
         y, x = int(wy), int(wx)
@@ -519,7 +587,13 @@ class MainRenderer:
         indices = np.clip(sim.env.terrain.astype(np.intp), 0, lut.shape[0] - 1)
         return lut[indices]
 
-    def _resource_shade(self, sim: Simulation, colors: np.ndarray) -> np.ndarray | None:
+    def _resource_shade(self, sim: Simulation, colors: np.ndarray):
+        """Resource channel for the current encoding mode."""
+        if self.quadrant_mode:
+            return self._quadrant_shade(sim, colors)
+        return self._overview_shade(sim, colors)
+
+    def _quadrant_shade(self, sim: Simulation, colors: np.ndarray) -> np.ndarray | None:
         """(H, W, 3) uint8 resource tint per cell, or None where capacity is zero."""
         env = sim.env
         capacity = env.resource_capacity
@@ -535,6 +609,30 @@ class MainRenderer:
         shade = colors.astype(np.float32)
         mix = ratio[:, :, None] * (high - low) + low
         np.copyto(shade, mix, where=active[:, :, None])
+        np.clip(shade, 0, 255, out=shade)
+        return shade.astype(np.uint8)
+
+    def _overview_shade(self, sim: Simulation, colors: np.ndarray) -> np.ndarray:
+        """Terrain hue scaled by resource level, for cells too small for quadrants.
+
+        Terrain stays the identifying hue; resource level only modulates
+        brightness. Cells with no capacity (rock, ocean) are left untouched.
+        """
+        env = sim.env
+        capacity = env.resource_capacity
+        active = capacity > 0
+        ratio = np.zeros(env.resources.shape, dtype=np.float32)
+        np.divide(env.resources, capacity, out=ratio, where=active)
+        np.clip(ratio, 0.0, 1.0, out=ratio)
+
+        shade = colors.astype(np.float32)
+        floor = self.OVERVIEW_MIN_BRIGHTNESS
+        brightness = floor + (1.0 - floor) * ratio
+        np.copyto(
+            shade,
+            shade * brightness[:, :, None],
+            where=active[:, :, None],
+        )
         np.clip(shade, 0, 255, out=shade)
         return shade.astype(np.uint8)
 
@@ -564,13 +662,16 @@ class MainRenderer:
         return pixels.reshape(map_width, cell, map_height, cell, 3)
 
     def _paint_world(self, colors: np.ndarray, shade, full: bool) -> None:
-        """Write terrain (and optionally the resource quadrant) into the layer.
+        """Write terrain (and the resource channel) into the cached layer.
 
-        A cell is ``cell_size`` pixels square: terrain fills all of it and the
-        resource tint occupies only its top-right quadrant, the same sub-cell
-        slot the old per-rect renderer drew. Terrain is painted as two
-        half-plane writes rather than one 5-D broadcast, which is roughly 2x
-        faster for a 1600x1600 layer.
+        Two encodings share this path:
+
+        * quadrant mode (zoomed in): terrain fills the cell and the resource
+          tint occupies its top-right quadrant, matching the documented 4x4
+          layout.
+        * overview mode (zoomed out): one blended colour across the whole cell,
+          because four quadrants inside a sub-4px cell carry no readable
+          information.
         """
         map_height, map_width = colors.shape[0], colors.shape[1]
         view = self._cell_view(map_width, map_height)
@@ -579,6 +680,14 @@ class MainRenderer:
         half = max(1, self._base_cell // 2)
         # Surfaces are x-major, so transpose the small (H, W, 3) cell arrays
         # rather than the multi-megabyte pixel buffer.
+
+        if not self.quadrant_mode:
+            # Overview: terrain hue scaled by resource level, whole cell.
+            base = (shade if shade is not None else colors).transpose(1, 0, 2)
+            view[:, :, :, :half, :] = base[:, None, :, None, :]
+            view[:, :, :, half:, :] = base[:, None, :, None, :]
+            return
+
         if full:
             colors_xy = colors.transpose(1, 0, 2)[:, None, :, None, :]
             view[:, :, :, :half, :] = colors_xy
@@ -607,6 +716,7 @@ class MainRenderer:
         self._base_cell = cell
         self._base_step = sim.current_step
         self._base_resources = self.show_resources
+        self._base_quadrant = self.quadrant_mode
         self._ensure_base_storage(map_width * cell, map_height * cell)
 
         colors = self._terrain_colors(sim)
@@ -631,7 +741,12 @@ class MainRenderer:
 
     def _ensure_world_layer(self, sim: Simulation) -> None:
         terrain_changed, resources_changed = self._world_layer_state(sim)
-        if terrain_changed:
+
+        # Switching encoding changes every pixel, so it needs a full rebuild
+        # rather than a resource-only patch.
+        encoding_changed = getattr(self, "_base_quadrant", None) != self.quadrant_mode
+
+        if terrain_changed or encoding_changed:
             self._rebuild_base(sim)
         elif resources_changed:
             self._update_resource_layer(sim)
@@ -673,11 +788,13 @@ class MainRenderer:
 
         self.screen.fill((10, 10, 20))
         self._draw_world(sim)
+        self._draw_sidebar_background()
         # get_statistics() copies every agent list, so call it once per frame.
         stats = sim.get_statistics()
         self.chart.update(stats["grazers"], stats["rabbits"], stats["predators"], paused)
         self.chart.draw(self.screen, self.font, self.small_font, self.vis.colors)
-        self._draw_hud(sim, paused, stats)
+        legend_bottom = self._draw_legend(stats)
+        self._draw_hud(sim, paused, stats, top=legend_bottom or None)
         if self.show_grid:
             self._draw_grid(sim)
         pygame.display.flip()
@@ -798,10 +915,6 @@ class MainRenderer:
                 return
             draw_rect(screen, color, (sx, sy, half, half))
 
-        if self.show_carcasses:
-            carcass_color = colors.get("carcass", (255, 0, 0))
-            for carcass in sim.carcasses:
-                blit(carcass, carcass_color)
         if self.show_predators:
             predator_color = colors.get("predator", (255, 100, 0))
             for predator in sim.predators:
@@ -813,6 +926,26 @@ class MainRenderer:
                 blit(grazer, grazer_color)
             for rabbit in sim.rabbits:
                 blit(rabbit, rabbit_color)
+
+        # Carcasses draw last, on top of everything. A kill deposits the carcass
+        # at the killer's own cell and that predator then stands on it while it
+        # feeds, so drawing carcasses underneath meant the orange marker of the
+        # very animal that made the carcass hid it for its whole lifetime.
+        if self.show_carcasses:
+            carcass_color = colors.get("carcass", (255, 0, 0))
+            outline = colors.get("carcass_outline", (255, 220, 220))
+            # A 2px mark at fit-to-window zoom is effectively invisible, so
+            # carcasses get a floor size independent of the cell size.
+            size = max(3, half)
+            for carcass in sim.carcasses:
+                sx = int((carcass.x - cam_x) * scale + centre_x)
+                if sx < -size or sx > view_w:
+                    continue
+                sy = int((carcass.y - cam_y) * scale + centre_y)
+                if sy < -size or sy > view_h:
+                    continue
+                draw_rect(screen, carcass_color, (sx, sy, size, size))
+                draw_rect(screen, outline, (sx, sy, size, size), 1)
 
         hover = self.hover
         if hover is not None:
@@ -858,6 +991,79 @@ class MainRenderer:
             if -1 <= sy <= self.view_h:
                 draw_line(screen, color, (span_left, sy), (span_right, sy))
 
+    # ------------------------------------------------------------------- legend
+
+    def _legend_rows(self, stats: dict) -> list[tuple[tuple[int, int, int], str, str]]:
+        """Colour key for everything the map draws, with live counts."""
+        colors = self.vis.colors
+        rows = [
+            ((tuple(colors.get("grazer", (255, 255, 0)))), "grazers", str(stats["grazers"])),
+            ((tuple(colors.get("rabbit", (255, 0, 255)))), "rabbits", str(stats["rabbits"])),
+            ((tuple(colors.get("predator", (255, 100, 0)))), "predators", str(stats["predators"])),
+            ((tuple(colors.get("carcass", (255, 0, 0)))), "carcasses", str(stats["carcasses"])),
+        ]
+        # Terrain swatches read from the same source the world layer uses.
+        for name, key in (("rock", "rock"), ("plains", "plains"), ("forest", "forest")):
+            terrain_cfg = self.config.environment.terrain_types.get(name)
+            if terrain_cfg is not None:
+                rows.append((tuple(terrain_cfg.color), f"{name}", ""))
+        rows.append((tuple(colors.get("resource_low", (30, 30, 30))), "resource", "empty"))
+        rows.append((tuple(colors.get("resource_high", (50, 255, 50))), "resource", "full"))
+        return rows
+
+    def _draw_legend(self, stats: dict) -> int:
+        """Draw the colour key in the sidebar; returns its bottom edge in y."""
+        if self.screen is None or self.font is None:
+            return 0
+
+        rows = self._legend_rows(stats)
+        margin = self.SIDEBAR_MARGIN
+        sidebar = self._sidebar_rect()
+        panel_width = sidebar.width - 2 * margin
+        if panel_width <= 0:
+            return 0
+
+        row_height = 17
+        title_height = 20
+        panel_height = title_height + row_height * len(rows) + 10
+
+        top = self.chart.rect.bottom + margin if self.chart.visible else margin
+        if top + panel_height > sidebar.height:
+            return 0
+
+        panel = pygame.Rect(sidebar.x + margin, top, panel_width, panel_height)
+        overlay = pygame.Surface(panel.size, pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 170))
+        self.screen.blit(overlay, panel.topleft)
+
+        title = self.font.render("Legend", True, (220, 220, 230))
+        self.screen.blit(title, (panel.x + 8, panel.y + 3))
+
+        swatch = 11
+        for i, (color, label, value) in enumerate(rows):
+            y = panel.y + title_height + i * row_height
+            pygame.draw.rect(
+                self.screen,
+                color,
+                pygame.Rect(panel.x + 8, y + 2, swatch, swatch),
+            )
+            pygame.draw.rect(
+                self.screen,
+                (90, 90, 110),
+                pygame.Rect(panel.x + 8, y + 2, swatch, swatch),
+                1,
+            )
+            text = self.font.render(label, True, (215, 215, 225))
+            self.screen.blit(text, (panel.x + 8 + swatch + 8, y))
+            if value:
+                width = self.font.size(value)[0]
+                self.screen.blit(
+                    self.font.render(value, True, (170, 170, 190)),
+                    (panel.right - 8 - width, y),
+                )
+
+        return panel.bottom
+
     # --------------------------------------------------------------------- hud
 
     def _hud_lines(self, sim: Simulation, paused: bool, stats: dict | None = None) -> list[str]:
@@ -865,26 +1071,53 @@ class MainRenderer:
             stats = sim.get_statistics()
         flags = ""
         if paused:
-            flags += "  [PAUSED]"
+            flags += " [PAUSED]"
         if sim.ended:
-            flags += "  [ENDED]"
-        return [
+            flags += " [ENDED]"
+
+        # Kept narrow enough for the sidebar so nothing is clipped.
+        lines = [
             f"step {sim.current_step}{flags}",
-            f"grazers {stats['grazers']}   rabbits {stats['rabbits']}"
-            f"   predators {stats['predators']}   carcasses {stats['carcasses']}",
-            f"resource {stats['total_resource']:.0f}",
-            f"fps {int(round(self.fps_ema))}   steps/s {self.step_rate:.1f}"
-            f"   timestep {self.config.simulation.timestep_ms}ms"
-            f"  x{self.config.simulation.simulation_speed:.2f}"
-            f"  zoom {self.zoom:.2f}",
-            "[CREATOR] "
-            f"brush={self.BRUSHES[self.brush_index]} size={self.brush_size}"
-            "  [1/2/3] brush  [+/-] size  [ctrl+click] grazer  [shift+click] predator"
-            if self.creator_mode
-            else "space pause | r reset | e new terrain | m creator | f1-f4 layers",
+            "",
+            f"grazers    {stats['grazers']}",
+            f"rabbits    {stats['rabbits']}",
+            f"predators  {stats['predators']}",
+            f"carcasses  {stats['carcasses']}",
+            f"resource   {stats['total_resource']:.0f}",
+            "",
+            f"fps {int(round(self.fps_ema))}  steps/s {self.step_rate:.1f}",
+            f"timestep {self.config.simulation.timestep_ms}ms"
+            f"  x{self.config.simulation.simulation_speed:.2f}",
+            f"zoom {self.zoom:.2f}",
+            "",
         ]
 
-    def _draw_hud(self, sim: Simulation, paused: bool, stats: dict | None = None) -> None:
+        if self.creator_mode:
+            lines += [
+                "[CREATOR MODE]",
+                f"brush {self.BRUSHES[self.brush_index]}  size {self.brush_size}",
+                "1/2/3 brush  +/- size",
+                "ctrl+click grazer",
+                "shift+click predator",
+                "m to exit",
+            ]
+        else:
+            lines += [
+                "space  pause",
+                "r  reset    e  terrain",
+                "m  creator",
+                "f1-f4  layers",
+                "f5  chart    0  fit",
+            ]
+        return lines
+
+    def _draw_hud(
+        self,
+        sim: Simulation,
+        paused: bool,
+        stats: dict | None = None,
+        top: int | None = None,
+    ) -> None:
         if not self.vis.show_stats or self.screen is None or self.font is None:
             return
         lines = self._hud_lines(sim, paused, stats)
@@ -893,25 +1126,28 @@ class MainRenderer:
 
         line_height = 18
         padding = 8
-        margin = 4
-        # default=0 covers an empty line list, which used to raise ValueError.
-        text_width = max((self.font.size(text)[0] for text in lines), default=0)
-        # Never let the panel overflow the window.
-        panel_width = min(text_width + padding * 2, max(0, self.view_w - 2 * margin))
-        panel_height = min(line_height * len(lines) + 10, max(0, self.view_h - 2 * margin))
+        margin = self.SIDEBAR_MARGIN
+        sidebar = self._sidebar_rect()
+
+        # Sit beneath the legend when it was drawn, otherwise beneath the chart.
+        # Either way the panel is inside the sidebar, never over the map.
+        if top is None:
+            top = self.chart.rect.bottom + margin if self.chart.visible else margin
+        panel_width = sidebar.width - 2 * margin
+        panel_height = line_height * len(lines) + 12
         if panel_width <= 0 or panel_height <= 0:
             return
+        if top + panel_height > sidebar.height:
+            panel_height = max(0, sidebar.height - top - margin)
+        if panel_height <= 0:
+            return
 
-        panel = pygame.Rect(
-            _clamp_int(margin, 0, max(0, self.view_w - panel_width)),
-            _clamp_int(self.view_h - panel_height - margin, 0, max(0, self.view_h - panel_height)),
-            panel_width,
-            panel_height,
-        )
+        panel = pygame.Rect(sidebar.x + margin, top, panel_width, panel_height)
 
         overlay = pygame.Surface(panel.size, pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 170))
         self.screen.blit(overlay, panel.topleft)
+
         for i, text in enumerate(lines):
             y = panel.y + 6 + i * line_height
             if y + line_height > panel.bottom:
