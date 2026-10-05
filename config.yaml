@@ -88,6 +88,29 @@ grazer:
   flee_radius: 5
   flee_weight: 3.0
   min_efficiency: 0.3
+  spawn_group_size: 14
+  spawn_group_radius: 6
+  # Grazers travel to fresh ground and stop to feed, like rabbits but with a
+  # longer stride and a higher travel tolerance. Travel peak is
+  # 18 * 0.25 = 4.5 < 5, so a journey always costs energy.
+  migratory: true
+  moving_efficiency: 0.25
+  # A grazer needs 450 net energy between an offspring (200) and reproduction
+  # (650). At x1.5 a typical cell yielded +2.0/step -> 225 steps, so grazers
+  # averaged ~300/1000 energy and never reached the threshold.
+  grazing_efficiency: 3.0
+  graze_ratio_threshold: 0.5
+  # Strip a cell fully before leaving it; at 0.12 they abandoned 12% of the
+  # remaining food on every visit.
+  migrate_ratio_threshold: 0.06
+  graze_energy_target: 1.0
+  graze_resume_energy: 0.7
+  wander_energy_threshold: 0.98
+  migrating_herd_weight: 2.5
+  movement_energy_cost: 0.6
+  flee_speed_multiplier: 1.3
+  flee_cost_multiplier: 2.5
+  grazing_move_multiplier: 0.667
 
 rabbit:
   initial_count: 100
@@ -105,22 +128,26 @@ rabbit:
   gradient_weight: 0.9
   gradient_weight_std: 0.1
   vision_radius: 4
-  herd_radius: 6
+  herd_radius: 8
   separation_radius: 2
-  herd_follow_chance: 0.7
-  cohesion_weight: 0.4
+  herd_follow_chance: 0.85
+  cohesion_weight: 0.6
   alignment_weight: 0.3
-  separation_weight: 0.3
+  separation_weight: 0.35
   flee_radius: 5
   flee_weight: 3.0
   min_efficiency: 0.3
+  spawn_group_size: 16
+  spawn_group_radius: 7
   migratory: true
   moving_efficiency: 0.25
   grazing_efficiency: 4.0
-  graze_ratio_threshold: 0.45
+  graze_ratio_threshold: 0.5
   migrate_ratio_threshold: 0.12
-  graze_energy_target: 0.85
+  graze_energy_target: 1.0
+  graze_resume_energy: 0.7
   wander_energy_threshold: 0.95
+  migrating_herd_weight: 3.0
   movement_energy_cost: 0.6
   flee_speed_multiplier: 1.3
   flee_cost_multiplier: 2.5
@@ -138,6 +165,8 @@ predator:
   move_speed: 2
   chase_radius: 7
   resource_sense_radius: 10
+  spawn_group_size: 6
+  spawn_group_radius: 8
   pack_radius: 10
   pack_hunt_chance: 0.6
   flank_chance: 0.4

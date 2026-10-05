@@ -66,6 +66,8 @@ class PreyConfig:
     flee_radius: int = 5
     flee_weight: float = 3.0
     min_efficiency: float = 0.3
+    spawn_group_size: int = 14
+    spawn_group_radius: int = 6
 
     # Stop-and-go foraging. When migratory is set, the species alternates between
     # travelling (moving while feeding at a reduced rate) and standing still to
@@ -75,8 +77,10 @@ class PreyConfig:
     grazing_efficiency: float = 2.5
     graze_ratio_threshold: float = 0.45
     migrate_ratio_threshold: float = 0.12
-    graze_energy_target: float = 0.85
+    graze_energy_target: float = 1.0
+    graze_resume_energy: float = 0.7
     wander_energy_threshold: float = 0.95
+    migrating_herd_weight: float = 2.5
 
     # Movement metabolism, charged per cell advanced on top of energy_per_step.
     movement_energy_cost: float = 0.6
@@ -108,6 +112,8 @@ class PredatorConfig:
     move_speed: int
     chase_radius: int
     resource_sense_radius: int
+    spawn_group_size: int = 6
+    spawn_group_radius: int = 8
     pack_radius: int = 10
     pack_hunt_chance: float = 0.6
     flank_chance: float = 0.4

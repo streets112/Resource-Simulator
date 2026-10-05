@@ -201,13 +201,66 @@ class Simulation:
                 return y, x
         return self.map_height // 2, self.map_width // 2
 
+    def _spawn_locations(
+        self, count: int, group_size: int, radius: int
+    ) -> list[tuple[int, int]]:
+        """Clustered spawn positions, so agents start as herds and packs.
+
+        Scattering every individual uniformly left the population with no social
+        structure at all: cohesion, alignment and separation had nothing to act
+        on, and herds only formed later by accident. Several distinct groups are
+        seeded rather than one clump, so the map does not open with a single
+        obvious cluster.
+        """
+        if count <= 0:
+            return []
+        group_size = max(1, int(group_size))
+        radius = max(0, int(radius))
+
+        group_count = -(-count // group_size)  # ceiling division
+        centers = [self._spawn_location() for _ in range(group_count)]
+
+        locations: list[tuple[int, int]] = []
+        for index in range(count):
+            cy, cx = centers[index % group_count]
+            if radius == 0:
+                locations.append((cy, cx))
+                continue
+            for _ in range(40):
+                offset_y = int(self.rng.integers(-radius, radius + 1))
+                offset_x = int(self.rng.integers(-radius, radius + 1))
+                ny, nx = self.env.clamp(cy + offset_y, cx + offset_x)
+                if self.env.is_passable(ny, nx):
+                    locations.append((ny, nx))
+                    break
+            else:
+                locations.append((cy, cx))
+        return locations
+
     def _spawn_initial_entities(self) -> None:
-        for _ in range(self.config.grazer.initial_count):
-            self._add_grazer()
-        for _ in range(self.config.rabbit.initial_count):
-            self._add_rabbit()
-        for _ in range(self.config.predator.initial_count):
-            self._add_predator()
+        grazer_cfg = self.config.grazer
+        for y, x in self._spawn_locations(
+            grazer_cfg.initial_count,
+            grazer_cfg.spawn_group_size,
+            grazer_cfg.spawn_group_radius,
+        ):
+            self._add_grazer(y, x)
+
+        rabbit_cfg = self.config.rabbit
+        for y, x in self._spawn_locations(
+            rabbit_cfg.initial_count,
+            rabbit_cfg.spawn_group_size,
+            rabbit_cfg.spawn_group_radius,
+        ):
+            self._add_rabbit(y, x)
+
+        predator_cfg = self.config.predator
+        for y, x in self._spawn_locations(
+            predator_cfg.initial_count,
+            predator_cfg.spawn_group_size,
+            predator_cfg.spawn_group_radius,
+        ):
+            self._add_predator(y, x)
 
     def _spawn_age(self, cfg) -> int:
         """Starting age drawn uniformly from 0 to maturity.
@@ -314,12 +367,17 @@ class Simulation:
     # ------------------------------------------------------------------ prey
 
     def _foraging_state(self, prey, cfg) -> str:
-        """Decide whether this prey travels or stops to feed.
+        """Decide whether this prey feeds where it stands or travels.
 
-        Travelling always costs more energy than it can gather, so a prey can
-        only make progress by standing still somewhere worth standing. It
-        therefore runs down local food, then moves on, and only stops when it
-        finds a cell good enough to justify the metabolic cost of staying.
+        The two thresholds form a hysteresis band rather than a single setpoint.
+        A feeding prey commits until it is full (or has stripped the cell), and
+        once it leaves it will not settle again until it has walked down to
+        ``graze_resume_energy``. With one shared threshold the species thrashed:
+        it topped up to full, stepped one cell, immediately qualified as
+        "hungry" again on any decent ground, and spent its life grazing in place.
+
+        While travelling, cohesion dominates so the herd moves as a pack toward
+        fresh ground instead of each individual picking its own target.
         """
         if not cfg.migratory:
             return "grazing"
@@ -328,14 +386,20 @@ class Simulation:
         energy_ratio = prey.energy_ratio
 
         if prey.foraging_state == "grazing":
-            # Stay only while this cell is still worth feeding on and we are not
-            # yet full; otherwise it is time to move on.
-            if ratio <= cfg.migrate_ratio_threshold or energy_ratio >= cfg.wander_energy_threshold:
+            # Stay until full, or until there is nothing left here worth eating.
+            if (
+                energy_ratio >= cfg.graze_energy_target
+                or ratio <= cfg.migrate_ratio_threshold
+                or energy_ratio >= cfg.wander_energy_threshold
+            ):
                 return "migrating"
             return "grazing"
 
-        # Travelling: stop where food is good and we still need to refuel.
-        if ratio >= cfg.graze_ratio_threshold and energy_ratio < cfg.graze_energy_target:
+        # Travelling: only settle once genuinely hungry, and only on good ground.
+        if (
+            energy_ratio <= cfg.graze_resume_energy
+            and ratio >= cfg.graze_ratio_threshold
+        ):
             return "grazing"
         return "migrating"
 
@@ -488,12 +552,18 @@ class Simulation:
 
         herd_weighted = None
         if herd is not None and self.rng.random() < cfg.herd_follow_chance:
-            herd_weighted = (
+            herd_weighted = [
                 herd[0] * cfg.cohesion_weight + herd[2] * cfg.alignment_weight,
                 herd[1] * cfg.cohesion_weight + herd[3] * cfg.alignment_weight,
                 herd[4] * cfg.separation_weight,
                 herd[5] * cfg.separation_weight,
-            )
+            ]
+            if cfg.migratory and prey.foraging_state == "migrating":
+                # Travelling as a pack: cohesion and alignment outweigh the
+                # individual gradient, so the herd moves as one body.
+                boost = cfg.migrating_herd_weight
+                herd_weighted[0] *= boost
+                herd_weighted[1] *= boost
 
         gradient_bias = float(np.clip(prey.gradient_weight, 0.0, 1.0))
 
