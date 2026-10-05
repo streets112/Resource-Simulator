@@ -1,0 +1,115 @@
+# Resource Simulator Configuration
+
+simulation:
+  width: 50
+  height: 50
+  timestep_ms: 100
+  max_steps: 0
+
+environment:
+  ocean_border_width: 1
+  terrain_types:
+    ocean:
+      color: [30, 60, 180]
+      resource_regen_rate: 0.0
+      resource_capacity: 0
+      passable: false
+      mobility_prey: 0.0
+      mobility_predator: 0.0
+      visibility_prey: 0.0
+      visibility_predator: 0.0
+    rock:
+      color: [80, 80, 80]
+      resource_regen_rate: 0.0
+      resource_capacity: 0
+      passable: true
+      mobility_prey: 0.5
+      mobility_predator: 0.3
+      visibility_prey: 1.0
+      visibility_predator: 1.0
+    plains:
+      color: [180, 200, 100]
+      resource_regen_rate: 1.5
+      resource_capacity: 30
+      passable: true
+      mobility_prey: 1.0
+      mobility_predator: 1.0
+      visibility_prey: 1.0
+      visibility_predator: 1.0
+    forest:
+      color: [60, 140, 60]
+      resource_regen_rate: 0.5
+      resource_capacity: 150
+      passable: true
+      mobility_prey: 0.5
+      mobility_predator: 0.75
+      visibility_prey: 0.4
+      visibility_predator: 0.6
+  terrain_distribution:
+    rock: 0.15
+    plains: 0.30
+    forest: 0.55
+  resource_diffusion_rate: 0.1
+
+grazer:
+  initial_count: 200
+  max_energy: 1000
+  energy_per_step: 10
+  energy_from_resource: 18
+  reproduction_min_age: 55
+  reproduction_min_energy: 650
+  reproduction_energy_cost: 0.25
+  offspring_initial_energy: 200
+  move_speed: 1
+  gradient_weight: 0.7
+  gradient_weight_std: 0.2
+  vision_radius: 5
+  max_fat: 500.0
+
+rabbit:
+  initial_count: 100
+  max_energy: 400
+  energy_per_step: 8
+  energy_from_resource: 12
+  reproduction_min_age: 20
+  reproduction_min_energy: 150
+  reproduction_energy_cost: 0.2
+  offspring_initial_energy: 100
+  move_speed: 1
+  gradient_weight: 0.9
+  gradient_weight_std: 0.1
+  vision_radius: 4
+
+predator:
+  initial_count: 30
+  max_energy: 800
+  energy_per_step: 3
+  energy_from_prey: 700
+  reproduction_min_age: 65
+  reproduction_min_energy: 250
+  reproduction_energy_cost: 0.3
+  offspring_initial_energy: 200
+  move_speed: 2
+  chase_radius: 7
+  resource_sense_radius: 10
+
+visualization:
+  cell_size: 8
+  show_grid: true
+  show_stats: true
+  fps: 60
+  window_width: 1024
+  window_height: 768
+  colors:
+    grazer: [255, 255, 0]
+    predator: [255, 100, 0]
+    carcass: [255, 0, 0]
+    rabbit: [255, 0, 255]
+    resource_low: [30, 30, 30]
+    resource_high: [50, 255, 50]
+
+output:
+  headless: false
+  export_interval: 1000
+  export_path: "output/simulation_data.json"
+  log_interval: 100
