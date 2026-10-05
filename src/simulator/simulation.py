@@ -1,17 +1,41 @@
-        """Reset the simulation to initial state."""        self.__init__(self.config, seed=self.rng.integers(0, 2**32-1))    def reset(self) -> None:import numpy as np
-from dataclasses import dataclass
-from typing import Optional
-from simulator.config import Config, GrazerConfig, RabbitConfig, PredatorConfig
+import numpy as np
+from dataclasses import dataclass, field
+
+from simulator.config import Config
 from simulator.environment import Environment
-from simulator.entities import Grazer, Rabbit, Predator, Carcass, Entity
+from simulator.entities import Carcass, Grazer, Predator, Rabbit
 
 
-def _sign(x: float) -> int:
-    if x > 0:
+def _sign(value: float) -> int:
+    if value > 0:
         return 1
-    elif x < 0:
+    if value < 0:
         return -1
     return 0
+
+
+class _SpatialIndex:
+    """Cell-bucketed neighbour lookup, so perception is O(n * radius^2) not O(n^2).
+
+    Built once per step from a snapshot of positions, which also makes agent
+    perception order-independent within a step.
+    """
+
+    __slots__ = ("cells",)
+
+    def __init__(self) -> None:
+        self.cells: dict[tuple[int, int], list] = {}
+
+    def add(self, y: int, x: int, item) -> None:
+        self.cells.setdefault((y, x), []).append(item)
+
+    def query(self, y0: int, y1: int, x0: int, x1: int):
+        cells = self.cells
+        for cy in range(y0, y1 + 1):
+            for cx in range(x0, x1 + 1):
+                bucket = cells.get((cy, cx))
+                if bucket:
+                    yield from bucket
 
 
 @dataclass
@@ -24,26 +48,78 @@ class SimulationStats:
     total_grazer_energy: float = 0.0
     total_rabbit_energy: float = 0.0
     total_predator_energy: float = 0.0
+    total_carcass_energy: float = 0.0
     avg_grazer_energy: float = 0.0
     avg_rabbit_energy: float = 0.0
     avg_predator_energy: float = 0.0
-    grazer_births: int = 0
-    rabbit_births: int = 0
-    predator_births: int = 0
-    grazer_deaths: int = 0
-    rabbit_deaths: int = 0
-    predator_deaths: int = 0
+    total_resource: float = 0.0
+    births_grazer: int = 0
+    births_rabbit: int = 0
+    births_predator: int = 0
+    deaths_grazer: int = 0
+    deaths_rabbit: int = 0
+    deaths_predator: int = 0
+    kills_grazer: int = 0
+    kills_rabbit: int = 0
+
+    def as_record(self) -> dict:
+        return {
+            "step": self.step,
+            "grazer_count": self.grazer_count,
+            "rabbit_count": self.rabbit_count,
+            "predator_count": self.predator_count,
+            "carcass_count": self.carcass_count,
+            "total_grazer_energy": self.total_grazer_energy,
+            "total_rabbit_energy": self.total_rabbit_energy,
+            "total_predator_energy": self.total_predator_energy,
+            "total_carcass_energy": self.total_carcass_energy,
+            "avg_grazer_energy": self.avg_grazer_energy,
+            "avg_rabbit_energy": self.avg_rabbit_energy,
+            "avg_predator_energy": self.avg_predator_energy,
+            "total_resource": self.total_resource,
+            "births_grazer": self.births_grazer,
+            "births_rabbit": self.births_rabbit,
+            "births_predator": self.births_predator,
+            "deaths_grazer": self.deaths_grazer,
+            "deaths_rabbit": self.deaths_rabbit,
+            "deaths_predator": self.deaths_predator,
+            "kills_grazer": self.kills_grazer,
+            "kills_rabbit": self.kills_rabbit,
+        }
+
+
+@dataclass
+class _Counters:
+    births_grazer: int = 0
+    births_rabbit: int = 0
+    births_predator: int = 0
+    deaths_grazer: int = 0
+    deaths_rabbit: int = 0
+    deaths_predator: int = 0
+    kills_grazer: int = 0
+    kills_rabbit: int = 0
 
 
 class Simulation:
-    def __init__(self, config: Config, seed: int | None = None):
+    def __init__(
+        self,
+        config: Config,
+        seed: int | None = None,
+        environment: Environment | None = None,
+    ):
         self.config = config
-        self.map_width = config.simulation.width
         self.map_height = config.simulation.height
-        self._ocean_border = config.environment.ocean_border_width
+        self.map_width = config.simulation.width
         self.rng = np.random.default_rng(seed)
 
-        self.env = Environment(config.environment, self.map_width, self.map_height, seed)
+        # Shared RNG so that environment generation and agent decisions replay
+        # identically for a given --seed.
+        if environment is not None:
+            self.env = environment
+        else:
+            self.env = Environment(
+                config.environment, self.map_width, self.map_height, self.rng
+            )
 
         self.grazers: list[Grazer] = []
         self.rabbits: list[Rabbit] = []
@@ -52,734 +128,843 @@ class Simulation:
 
         self.stats_history: list[SimulationStats] = []
         self.current_step = 0
+        self.counters = _Counters()
+        self.ended = False
+        self.extinct_step: int | None = None
 
+        self._refresh_fields()
         self._spawn_initial_entities()
 
-    def _spawn_initial_entities(self) -> None:
-        for _ in range(self.config.grazer.initial_count):
-            self._spawn_grazer()
+    # ------------------------------------------------------------- life cycle
 
-        for _ in range(self.config.rabbit.initial_count):
-            self._spawn_rabbit()
+    def reset(self, seed: int | None = None) -> None:
+        """R key: fresh populations and statistics, identical environment."""
+        environment = self.env
+        self.__init__(self.config, seed=seed, environment=environment)
 
-        for _ in range(self.config.predator.initial_count):
-            self._spawn_predator()
-
-    def _spawn_grazer(self) -> None:
-        y, x = self._find_spawn_location()
-        grazer = Grazer(
-            x=float(x),
-            y=float(y),
-            energy=self.config.grazer.max_energy * self.rng.uniform(0.5, 1.0),
-            max_energy=self.config.grazer.max_energy,
-            config=self.config.grazer,
+    def reload_environment(self, seed: int | None = None) -> None:
+        """E key: regenerate terrain, keep every entity and the statistics history."""
+        environment = Environment(
+            self.config.environment, self.map_width, self.map_height, self.rng
         )
-        grazer.gradient_weight = self.rng.normal(
-            self.config.grazer.gradient_weight, self.config.grazer.gradient_weight_std
-        )
-        grazer.gradient_weight = np.clip(grazer.gradient_weight, 0.1, 1.0)
-        self.grazers.append(grazer)
+        history = self.stats_history
+        step = self.current_step
+        counters = self.counters
 
-    def _spawn_rabbit(self) -> None:
-        y, x = self._find_spawn_location()
-        rabbit = Rabbit(
-            x=float(x),
-            y=float(y),
-            energy=self.config.rabbit.max_energy * self.rng.uniform(0.5, 1.0),
-            max_energy=self.config.rabbit.max_energy,
-            config=self.config.rabbit,
-        )
-        rabbit.gradient_weight = self.rng.normal(
-            self.config.rabbit.gradient_weight, self.config.rabbit.gradient_weight_std
-        )
-        rabbit.gradient_weight = np.clip(rabbit.gradient_weight, 0.1, 1.0)
-        self.rabbits.append(rabbit)
+        self.__init__(self.config, seed=seed, environment=environment)
 
-    def _spawn_predator(self) -> None:
-        y, x = self._find_spawn_location()
-        predator = Predator(
-            x=float(x),
-            y=float(y),
-            energy=self.config.predator.max_energy * self.rng.uniform(0.5, 1.0),
-            max_energy=self.config.predator.max_energy,
-            config=self.config.predator,
-        )
-        self.predators.append(predator)
+        self.stats_history = history
+        self.current_step = step
+        self.counters = counters
+        self.carcasses.clear()
 
-    def _find_spawn_location(self) -> tuple[int, int]:
-        for _ in range(100):
-            y = self.rng.integers(self._ocean_border, self.map_height - self._ocean_border)
-            x = self.rng.integers(self._ocean_border, self.map_width - self._ocean_border)
+    def _refresh_fields(self) -> None:
+        """Vectorised per-step lookup tables derived from the resource field."""
+        capacity = self.env.resource_capacity
+        self._ratios = np.divide(
+            self.env.resources,
+            capacity,
+            out=np.zeros_like(self.env.resources),
+            where=capacity > 0,
+        )
+
+    def _build_indices(self) -> None:
+        """Snapshot alive agents into spatial indices for neighbour queries."""
+        prey = _SpatialIndex()
+        for grazer in self.grazers:
+            prey.add(int(grazer.y), int(grazer.x), grazer)
+        for rabbit in self.rabbits:
+            prey.add(int(rabbit.y), int(rabbit.x), rabbit)
+
+        predators = _SpatialIndex()
+        for predator in self.predators:
+            predators.add(int(predator.y), int(predator.x), predator)
+
+        self._prey_index = prey
+        self._predator_index = predators
+
+    # ------------------------------------------------------------- distance
+
+    def distance(self, y1: int, x1: int, y2: int, x2: int) -> int:
+        """SPECIFICATION.md bounded Chebyshev distance (toroidal)."""
+        dy = abs(y1 - y2)
+        dx = abs(x1 - x2)
+        return int(max(min(dy, self.map_height - dy), min(dx, self.map_width - dx)))
+
+    # -------------------------------------------------------------- spawning
+
+    def _spawn_location(self) -> tuple[int, int]:
+        for _ in range(200):
+            y = int(self.rng.integers(0, self.map_height))
+            x = int(self.rng.integers(0, self.map_width))
             if self.env.is_passable(y, x):
                 return y, x
         return self.map_height // 2, self.map_width // 2
 
-    def _clamp(self, value: float, min_val: int, max_val: int) -> float:
-        return max(min_val, min(max_val, value))
-
-    def _grazer_move(self, g: Grazer) -> None:
-        y, x = int(g.y), int(g.x)
-        min_y = self._ocean_border
-        max_y = self.map_height - 1 - self._ocean_border
-        min_x = self._ocean_border
-        max_x = self.map_width - 1 - self._ocean_border
-
-        current_terrain = self.env.get_terrain_at(y, x)
-        current_mobility = self.env.get_mobility_prey(current_terrain)
-
-        herd_radius = 6
-        separation_radius = 2
-
-        neighbors = []
-        for other in self.grazers:
-            if other is g or not other.alive:
-                continue
-            dy = abs(int(other.y) - y)
-            dx = abs(int(other.x) - x)
-            dist = max(dy, dx)
-            if dist <= herd_radius:
-                neighbors.append((other, dist))
-
-        cohesion_dy, cohesion_dx = 0, 0
-        separation_dy, separation_dx = 0, 0
-
-        if neighbors:
-            for other, dist in neighbors:
-                dy = int(other.y) - int(g.y)
-                dx = int(other.x) - int(g.x)
-                cohesion_dy += dy
-                cohesion_dx += dx
-
-                if dist <= separation_radius:
-                    separation_dy -= dy * (separation_radius - dist + 1)
-                    separation_dx -= dx * (separation_radius - dist + 1)
-
-            n = len(neighbors)
-            cohesion_dy, cohesion_dx = cohesion_dy / n, cohesion_dx / n
-
-        best_dy, best_dx = 0, 0
-
-        for _ in range(max(1, int(g.move_speed * current_mobility))):
-            candidates = []
-            energy_ratio = g.energy / g.max_energy if g.max_energy > 0 else 0
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny = self._clamp(int(g.y) + dy, 0, self.map_height - 1)
-                    nx = self._clamp(int(g.x) + dx, 0, self.map_width - 1)
-                    if not self.env.is_passable(ny, nx):
-                        continue
-                    target_terrain = self.env.get_terrain_at(ny, nx)
-                    target_mobility = self.env.get_mobility_prey(target_terrain)
-                    resource_ratio = self.env.get_resource_ratio(ny, nx)
-                    candidates.append((dy, dx, resource_ratio, target_mobility, target_terrain))
-
-            if not candidates:
-                break
-
-            use_gradient = self.rng.random() < g.gradient_weight
-
-            if use_gradient and candidates:
-                energy_ratio = g.energy / g.max_energy if g.max_energy > 0 else 0
-                scored_candidates = []
-                for dy, dx, resource_ratio, target_mobility, target_terrain in candidates:
-                    score = resource_ratio
-                    if energy_ratio > 0.7:
-                        score += (1.0 - resource_ratio) * 0.3
-                    scored_candidates.append((dy, dx, score))
-
-                scored_candidates.sort(key=lambda c: c[2], reverse=True)
-                best_dy, best_dx, _ = scored_candidates[0]
-            else:
-                scored_candidates = []
-                for dy, dx, resource_ratio, target_mobility, target_terrain in candidates:
-                    score = resource_ratio
-                    if energy_ratio > 0.7:
-                        score += (1.0 - resource_ratio) * 0.2
-                    scored_candidates.append((dy, dx, score))
-
-                total_score = sum(c[2] for c in scored_candidates)
-                if total_score > 0:
-                    r_val = self.rng.uniform(0, total_score)
-                    cumsum = 0
-                    for dy, dx, score in scored_candidates:
-                        cumsum += score
-                        if cumsum >= r_val:
-                            best_dy, best_dx = dy, dx
-                            break
-                else:
-                    best_dy, best_dx, _, _, _ = candidates[self.rng.integers(0, len(candidates))]
-
-                if neighbors and self.rng.random() < 0.7:
-                    target_dy = int(_sign(cohesion_dy)) if cohesion_dy != 0 else 0
-                    target_dx = int(_sign(cohesion_dx)) if cohesion_dx != 0 else 0
-                    if target_dy != 0 or target_dx != 0:
-                        for dy, dx, _, _, _ in candidates:
-                            if dy == target_dy and dx == target_dx:
-                                best_dy, best_dx = dy, dx
-                                break
-
-            g.y = self._clamp(g.y + best_dy, 0, self.map_height - 1)
-            g.x = self._clamp(g.x + best_dx, 0, self.map_width - 1)
-
-    def _grazer_eat(self, g: Grazer) -> None:
-        y, x = int(g.y), int(g.x)
-        ratio = self.env.get_resource_ratio(y, x)
-        if ratio <= 0:
-            return
-
-        if g.energy >= g.max_energy * 0.9:
-            return
-
-        amount = self.config.grazer.energy_from_resource
-
-        if g.eating_state != "grazing":
-            eaten = g.eat_while_moving(amount)
-            if ratio > 0.5 and self.rng.random() < 0.3:
-                g.eating_state = "grazing"
-                g.grazing_timer = 3
-        else:
-            eaten = g.eat_while_stopped(amount)
-            g.grazing_timer -= 1
-            if g.grazing_timer <= 0:
-                g.eating_state = "moving"
-
-        if g.fat > 0 and g.energy < g.max_energy * 0.3:
-            g.use_fat(min(g.fat, 20.0))
-
-    def _update_grazers(self) -> None:
-        for g in self.grazers:
-            if not g.alive:
-                continue
-            g.step_energy(self.config.grazer.energy_per_step)
-            if g.alive:
-                self._grazer_move(g)
-                self._grazer_eat(g)
-
-    def _rabbit_move(self, r: Rabbit) -> None:
-        y, x = int(r.y), int(r.x)
-        min_y = self._ocean_border
-        max_y = self.map_height - 1 - self._ocean_border
-        min_x = self._ocean_border
-        max_x = self.map_width - 1 - self._ocean_border
-
-        current_terrain = self.env.get_terrain_at(y, x)
-        current_mobility = self.env.get_mobility_prey(current_terrain)
-
-        herd_radius = 6
-        separation_radius = 2
-        flee_radius = 5
-
-        neighbors = []
-        for other in self.rabbits:
-            if other is r or not other.alive:
-                continue
-            dy = abs(int(other.y) - y)
-            dx = abs(int(other.x) - x)
-            dist = max(dy, dx)
-            if dist <= herd_radius:
-                neighbors.append((other, dist))
-
-        nearby_predators = []
-        for p in self.predators:
-            if not p.alive:
-                continue
-            dist = max(abs(int(p.y) - y), abs(int(p.x) - x))
-            if dist <= flee_radius:
-                nearby_predators.append((p, dist))
-
-        cohesion_dy, cohesion_dx = 0, 0
-        separation_dy, separation_dx = 0, 0
-
-        if neighbors:
-            for other, dist in neighbors:
-                dy = int(other.y) - int(r.y)
-                dx = int(other.x) - int(r.x)
-                cohesion_dy += dy
-                cohesion_dx += dx
-
-                if dist <= separation_radius:
-                    separation_dy -= dy * (separation_radius - dist + 1)
-                    separation_dx -= dx * (separation_radius - dist + 1)
-
-            n = len(neighbors)
-            cohesion_dy, cohesion_dx = cohesion_dy / n, cohesion_dx / n
-
-        best_dy, best_dx = 0, 0
-
-        for _ in range(max(1, int(r.move_speed * current_mobility))):
-            candidates = []
-            energy_ratio = r.energy / r.max_energy if r.max_energy > 0 else 0
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny = self._clamp(int(r.y) + dy, 0, self.map_height - 1)
-                    nx = self._clamp(int(r.x) + dx, 0, self.map_width - 1)
-                    if not self.env.is_passable(ny, nx):
-                        continue
-                    target_terrain = self.env.get_terrain_at(ny, nx)
-                    target_mobility = self.env.get_mobility_prey(target_terrain)
-                    resource_ratio = self.env.get_resource_ratio(ny, nx)
-                    candidates.append((dy, dx, resource_ratio, target_mobility, target_terrain))
-
-            if not candidates:
-                break
-
-            use_gradient = self.rng.random() < r.gradient_weight
-
-            if use_gradient and candidates:
-                energy_ratio = r.energy / r.max_energy if r.max_energy > 0 else 0
-                scored_candidates = []
-                for dy, dx, resource_ratio, target_mobility, target_terrain in candidates:
-                    score = resource_ratio
-                    if energy_ratio > 0.7:
-                        score += (1.0 - resource_ratio) * 0.4
-                    scored_candidates.append((dy, dx, score))
-
-                scored_candidates.sort(key=lambda c: c[2], reverse=True)
-                best_dy, best_dx, _ = scored_candidates[0]
-            else:
-                scored_candidates = []
-                for dy, dx, resource_ratio, target_mobility, target_terrain in candidates:
-                    score = resource_ratio
-                    if r.energy / r.max_energy > 0.7:
-                        score += (1.0 - resource_ratio) * 0.3
-                    scored_candidates.append((dy, dx, score))
-
-                total_score = sum(c[2] for c in scored_candidates)
-                if total_score > 0:
-                    r_val = self.rng.uniform(0, total_score)
-                    cumsum = 0
-                    for dy, dx, score in scored_candidates:
-                        cumsum += score
-                        if cumsum >= r_val:
-                            best_dy, best_dx = dy, dx
-                            break
-                else:
-                    best_dy, best_dx, _, _, _ = candidates[self.rng.integers(0, len(candidates))]
-
-                if nearby_predators and self.rng.random() < 0.9:
-                    total_flee_dy, total_flee_dx = 0, 0
-                    for p, dist in nearby_predators:
-                        weight = 1.0 / max(1, dist)
-                        total_flee_dy += -int(_sign(p.y - r.y)) * weight
-                        total_flee_dx += -int(_sign(p.x - r.x)) * weight
-
-                    target_dy = int(_sign(total_flee_dy))
-                    target_dx = int(_sign(total_flee_dx))
-                    for dy, dx, _, _, _ in candidates:
-                        if dy == target_dy and dx == target_dx:
-                            best_dy, best_dx = dy, dx
-                            break
-                elif neighbors:
-                    target_dy = int(_sign(cohesion_dy)) if cohesion_dy != 0 else 0
-                    target_dx = int(_sign(cohesion_dx)) if cohesion_dx != 0 else 0
-                    if target_dy != 0 or target_dx != 0:
-                        for dy, dx, _, _, _ in candidates:
-                            if dy == target_dy and dx == target_dx:
-                                best_dy, best_dx = dy, dx
-                                break
-
-            r.y = self._clamp(r.y + best_dy, 0, self.map_height - 1)
-            r.x = self._clamp(r.x + best_dx, 0, self.map_width - 1)
-
-    def _rabbit_eat(self, r: Rabbit) -> None:
-        y, x = int(r.y), int(r.x)
-        ratio = self.env.get_resource_ratio(y, x)
-        if r.eating_state == "moving":
-            efficiency = 0.2 * max(0.3, ratio)
-            eaten = self.env.consume_resource(y, x, self.config.rabbit.energy_from_resource * efficiency)
-            r.add_energy(eaten)
-            if ratio > 0.5 and self.rng.random() < 0.3:
-                r.eating_state = "grazing"
-                r.grazing_timer = 3
-        else:
-            efficiency = 3.0 * max(0.3, ratio)
-            eaten = self.env.consume_resource(y, x, self.config.rabbit.energy_from_resource * efficiency)
-            r.add_energy(eaten)
-            r.grazing_timer -= 1
-            if r.grazing_timer <= 0:
-                r.eating_state = "moving"
-
-    def _update_rabbits(self) -> None:
-        for r in self.rabbits:
-            if not r.alive:
-                continue
-            r.step_energy(self.config.rabbit.energy_per_step)
-            if r.alive:
-                self._rabbit_move(r)
-                self._rabbit_eat(r)
-
-    def _find_prey(self, predator: Predator, prey_type: str) -> Optional[Entity]:
-        vision = self.env.get_effective_vision_predator(int(predator.y), int(predator.x), predator.chase_radius)
-        best_prey = None
-        best_dist = float('inf')
-
-        prey_list = self.grazers if prey_type == "grazer" else self.rabbits
-
-        for prey in prey_list:
-            if not prey.alive:
-                continue
-            dy = abs(int(prey.y) - int(predator.y))
-            dx = abs(int(prey.x) - int(predator.x))
-            dist = max(dy, dx)
-            if dist <= vision and dist < best_dist:
-                terrain = self.env.get_terrain_at(int(prey.y), int(prey.x))
-                if self.env.can_see_through(int(predator.y), int(predator.x), int(prey.y), int(prey.x), True):
-                    best_prey = prey
-                    best_dist = dist
-
-        return best_prey
-
-    def _find_pack_target(self, predator: Predator) -> Optional[Entity]:
-        vision = self.env.get_effective_vision_predator(int(predator.y), int(predator.x), predator.chase_radius)
-        best_prey = None
-        best_dist = float('inf')
-
-        for grazer in self.grazers:
-            if not grazer.alive:
-                continue
-            dy = abs(int(grazer.y) - int(predator.y))
-            dx = abs(int(grazer.x) - int(predator.x))
-            dist = max(dy, dx)
-            if dist <= vision and dist < best_dist:
-                if self.env.can_see_through(int(predator.y), int(predator.x), int(grazer.y), int(grazer.x), True):
-                    best_prey = grazer
-                    best_dist = dist
-
-        for rabbit in self.rabbits:
-            if not rabbit.alive:
-                continue
-            dy = abs(int(rabbit.y) - int(predator.y))
-            dx = abs(int(rabbit.x) - int(predator.x))
-            dist = max(dy, dx)
-            if dist <= vision and dist < best_dist:
-                if self.env.can_see_through(int(predator.y), int(predator.x), int(rabbit.y), int(rabbit.x), True):
-                    best_prey = rabbit
-                    best_dist = dist
-
-        return best_prey
-
-    def _predator_chase(self, predator: Predator, target: Entity) -> None:
-        y, x = int(predator.y), int(predator.x)
-        ty, tx = int(target.y), int(target.x)
-
-        current_terrain = self.env.get_terrain_at(y, x)
-        mobility = self.env.get_mobility_predator(current_terrain)
-
-        best_dy, best_dx = 0, 0
-        best_dist = float('inf')
-
-        for _ in range(max(1, int(predator.move_speed * mobility))):
-            candidates = []
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny = self._clamp(y + dy, 0, self.map_height - 1)
-                    nx = self._clamp(x + dx, 0, self.map_width - 1)
-                    if not self.env.is_passable(ny, nx):
-                        continue
-                    candidates.append((dy, dx, ny, nx))
-
-            if not candidates:
-                break
-
-            scored = []
-            for dy, dx, ny, nx in candidates:
-                dist = max(abs(ny - ty), abs(nx - tx))
-                scored.append((dy, dx, dist))
-
-            scored.sort(key=lambda s: s[2])
-            best_dy, best_dx, best_dist = scored[0]
-
-            y, x = int(predator.y) + best_dy, int(predator.x) + best_dx
-            predator.y = self._clamp(predator.y + best_dy, 0, self.map_height - 1)
-            predator.x = self._clamp(predator.x + best_dx, 0, self.map_width - 1)
-
-    def _predator_eat_carcass(self, predator: Predator) -> bool:
-        y, x = int(predator.y), int(predator.x)
-        for carcass in self.carcasses:
-            if carcass.energy <= 0:
-                continue
-            dy = abs(int(carcass.y) - y)
-            dx = abs(int(carcass.x) - x)
-            if max(dy, dx) <= 1:
-                eaten = carcass.take_energy(self.config.predator.energy_from_prey * 0.5)
-                if eaten > 0:
-                    predator.add_energy(eaten)
-                    predator.eating_state = "eating_carcass"
-                    predator.eating_timer = 2
-                    return True
-        return False
-
-    def _predator_eat_prey(self, predator: Predator) -> bool:
-        y, x = int(predator.y), int(predator.x)
-
-        for grazer in self.grazers:
-            if not grazer.alive:
-                continue
-            if int(grazer.y) == y and int(grazer.x) == x:
-                grazer.alive = False
-                energy_gained = min(self.config.predator.energy_from_prey, grazer.energy + grazer.fat)
-                predator.add_energy(energy_gained)
-                self.carcasses.append(Carcass(
-                    x=float(x), y=float(y),
-                    energy=grazer.energy * 0.5,
-                    max_energy=grazer.energy * 0.5
-                ))
-                predator.eating_state = "eating_prey"
-                predator.eating_timer = 3
-                return True
-
-        for rabbit in self.rabbits:
-            if not rabbit.alive:
-                continue
-            if int(rabbit.y) == y and int(rabbit.x) == x:
-                rabbit.alive = False
-                energy_gained = min(self.config.predator.energy_from_prey, rabbit.energy)
-                predator.add_energy(energy_gained)
-                self.carcasses.append(Carcass(
-                    x=float(x), y=float(y),
-                    energy=rabbit.energy * 0.5,
-                    max_energy=rabbit.energy * 0.5
-                ))
-                predator.eating_state = "eating_prey"
-                predator.eating_timer = 3
-                return True
-
-        return False
-
-    def _update_predators(self) -> None:
-        for p in self.predators:
-            if not p.alive:
-                continue
-
-            p.step_energy(self.config.predator.energy_per_step)
-            if not p.alive:
-                continue
-
-            if p.eating_state == "eating_carcass":
-                p.eating_timer -= 1
-                if p.eating_timer <= 0:
-                    p.eating_state = "moving"
-                continue
-            elif p.eating_state == "eating_prey":
-                p.eating_timer -= 1
-                if p.eating_timer <= 0:
-                    p.eating_state = "moving"
-                continue
-
-            if self._predator_eat_carcass(p):
-                continue
-
-            if self._predator_eat_prey(p):
-                continue
-
-            target = self._find_pack_target(p)
-            if target:
-                self._predator_chase(p, target)
-            else:
-                self._predator_wander(p)
-
-    def _predator_wander(self, predator: Predator) -> None:
-        y, x = int(predator.y), int(predator.x)
-        current_terrain = self.env.get_terrain_at(y, x)
-        mobility = self.env.get_mobility_predator(current_terrain)
-
-        best_dy, best_dx = 0, 0
-        best_score = -1
-
-        for _ in range(max(1, int(predator.move_speed * mobility))):
-            candidates = []
-            for dy in [-1, 0, 1]:
-                for dx in [-1, 0, 1]:
-                    if dy == 0 and dx == 0:
-                        continue
-                    ny = self._clamp(y + dy, 0, self.map_height - 1)
-                    nx = self._clamp(x + dx, 0, self.map_width - 1)
-                    if not self.env.is_passable(ny, nx):
-                        continue
-                    resource_ratio = self.env.get_resource_ratio(ny, nx)
-                    candidates.append((dy, dx, resource_ratio, ny, nx))
-
-            if not candidates:
-                break
-
-            scored = []
-            for dy, dx, ratio, ny, nx in candidates:
-                score = ratio
-                dist_to_center = max(abs(ny - self.map_height // 2), abs(nx - self.map_width // 2))
-                score -= dist_to_center * 0.01
-                scored.append((dy, dx, score))
-
-            scored.sort(key=lambda s: s[2], reverse=True)
-            best_dy, best_dx, best_score = scored[0]
-
-            y, x = int(predator.y) + best_dy, int(predator.x) + best_dx
-            predator.y = self._clamp(predator.y + best_dy, 0, self.map_height - 1)
-            predator.x = self._clamp(predator.x + best_dx, 0, self.map_width - 1)
-
-    def _handle_reproduction(self) -> None:
-        new_grazers = []
-        for g in self.grazers:
-            if not g.alive:
-                continue
-            if (g.age >= self.config.grazer.reproduction_min_age and
-                g.energy >= self.config.grazer.reproduction_min_energy):
-                cost = g.max_energy * self.config.grazer.reproduction_energy_cost
-                if g.energy >= cost:
-                    g.energy -= cost
-                    offspring = Grazer(
-                        x=g.x + self.rng.uniform(-1, 1),
-                        y=g.y + self.rng.uniform(-1, 1),
-                        energy=self.config.grazer.offspring_initial_energy,
-                        max_energy=self.config.grazer.max_energy,
-                        config=self.config.grazer,
-                    )
-                    offspring.gradient_weight = self.rng.normal(
-                        self.config.grazer.gradient_weight, self.config.grazer.gradient_weight_std
-                    )
-                    offspring.gradient_weight = np.clip(offspring.gradient_weight, 0.1, 1.0)
-                    new_grazers.append(offspring)
-
-        new_rabbits = []
-        for r in self.rabbits:
-            if not r.alive:
-                continue
-            if (r.age >= self.config.rabbit.reproduction_min_age and
-                r.energy >= self.config.rabbit.reproduction_min_energy):
-                cost = r.max_energy * self.config.rabbit.reproduction_energy_cost
-                if r.energy >= cost:
-                    r.energy -= cost
-                    offspring = Rabbit(
-                        x=r.x + self.rng.uniform(-1, 1),
-                        y=r.y + self.rng.uniform(-1, 1),
-                        energy=self.config.rabbit.offspring_initial_energy,
-                        max_energy=self.config.rabbit.max_energy,
-                        config=self.config.rabbit,
-                    )
-                    offspring.gradient_weight = self.rng.normal(
-                        self.config.rabbit.gradient_weight, self.config.rabbit.gradient_weight_std
-                    )
-                    offspring.gradient_weight = np.clip(offspring.gradient_weight, 0.1, 1.0)
-                    new_rabbits.append(offspring)
-
-        new_predators = []
-        for p in self.predators:
-            if not p.alive:
-                continue
-            if (p.age >= self.config.predator.reproduction_min_age and
-                p.energy >= self.config.predator.reproduction_min_energy):
-                cost = p.max_energy * self.config.predator.reproduction_energy_cost
-                if p.energy >= cost:
-                    p.energy -= cost
-                    offspring = Predator(
-                        x=p.x + self.rng.uniform(-1, 1),
-                        y=p.y + self.rng.uniform(-1, 1),
-                        energy=self.config.predator.offspring_initial_energy,
-                        max_energy=self.config.predator.max_energy,
-                        config=self.config.predator,
-                    )
-                    new_predators.append(offspring)
-
-        self.grazers.extend(new_grazers)
-        self.rabbits.extend(new_rabbits)
-        self.predators.extend(new_predators)
-
-    def _cleanup_dead(self) -> None:
-        self.grazers = [g for g in self.grazers if g.alive]
-        self.rabbits = [r for r in self.rabbits if r.alive]
-        self.predators = [p for p in self.predators if p.alive]
-        self.carcasses = [c for c in self.carcasses if c.can_provide_energy()]
-
-    def _record_stats(self) -> SimulationStats:
-        stats = SimulationStats()
-        stats.step = self.current_step
-
-        alive_grazers = [g for g in self.grazers if g.alive]
-        alive_rabbits = [r for r in self.rabbits if r.alive]
-        alive_predators = [p for p in self.predators if p.alive]
-
-        stats.grazer_count = len(alive_grazers)
-        stats.rabbit_count = len(alive_rabbits)
-        stats.predator_count = len(alive_predators)
-        stats.carcass_count = len([c for c in self.carcasses if c.can_provide_energy()])
-
-        stats.total_grazer_energy = sum(g.energy for g in alive_grazers)
-        stats.total_rabbit_energy = sum(r.energy for r in alive_rabbits)
-        stats.total_predator_energy = sum(p.energy for p in alive_predators)
-
-        stats.avg_grazer_energy = stats.total_grazer_energy / stats.grazer_count if stats.grazer_count > 0 else 0
-        stats.avg_rabbit_energy = stats.total_rabbit_energy / stats.rabbit_count if stats.rabbit_count > 0 else 0
-        stats.avg_predator_energy = stats.total_predator_energy / stats.predator_count if stats.predator_count > 0 else 0
-
-        return stats
+    def _spawn_initial_entities(self) -> None:
+        for _ in range(self.config.grazer.initial_count):
+            self._add_grazer()
+        for _ in range(self.config.rabbit.initial_count):
+            self._add_rabbit()
+        for _ in range(self.config.predator.initial_count):
+            self._add_predator()
+
+    def _add_grazer(self, y: int | None = None, x: int | None = None) -> Grazer:
+        cfg = self.config.grazer
+        if y is None or x is None:
+            y, x = self._spawn_location()
+        weight = float(np.clip(self.rng.normal(cfg.gradient_weight, cfg.gradient_weight_std), 0.0, 1.0))
+        grazer = Grazer(
+            x=float(x),
+            y=float(y),
+            energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
+            config=cfg,
+            gradient_weight=weight,
+            inherited_gradient_weight=weight,
+        )
+        self.grazers.append(grazer)
+        return grazer
+
+    def _add_rabbit(self, y: int | None = None, x: int | None = None) -> Rabbit:
+        cfg = self.config.rabbit
+        if y is None or x is None:
+            y, x = self._spawn_location()
+        weight = float(np.clip(self.rng.normal(cfg.gradient_weight, cfg.gradient_weight_std), 0.0, 1.0))
+        rabbit = Rabbit(
+            x=float(x),
+            y=float(y),
+            energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
+            config=cfg,
+            gradient_weight=weight,
+            inherited_gradient_weight=weight,
+        )
+        self.rabbits.append(rabbit)
+        return rabbit
+
+    def _add_predator(self, y: int | None = None, x: int | None = None) -> Predator:
+        cfg = self.config.predator
+        if y is None or x is None:
+            y, x = self._spawn_location()
+        predator = Predator(
+            x=float(x),
+            y=float(y),
+            energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
+            config=cfg,
+        )
+        self.predators.append(predator)
+        return predator
+
+    def spawn_grazer_at(self, y: int, x: int) -> Grazer | None:
+        if not self.env.is_passable(y, x):
+            return None
+        self._add_grazer(y, x)
+        return self.grazers[-1]
+
+    def spawn_predator_at(self, y: int, x: int) -> Predator | None:
+        if not self.env.is_passable(y, x):
+            return None
+        self._add_predator(y, x)
+        return self.predators[-1]
+
+    # ------------------------------------------------------------------ loop
 
     def step(self) -> None:
         self.env.step()
+        self._refresh_fields()
+        self._build_indices()
 
-        for c in self.carcasses:
-            c.step()
+        for carcass in self.carcasses:
+            carcass.step()
 
-        self._update_grazers()
-        self._update_rabbits()
+        self._update_prey(self.grazers, self.config.grazer, "grazer")
+        self._update_prey(self.rabbits, self.config.rabbit, "rabbit")
         self._update_predators()
 
-        self._handle_reproduction()
-
-        self._cleanup_dead()
+        self._reproduce()
+        self._cleanup()
 
         stats = self._record_stats()
         self.stats_history.append(stats)
-
         self.current_step += 1
 
+        if not self.grazers and not self.rabbits and not self.predators:
+            self.ended = True
+            self.extinct_step = self.current_step
+
     def run(self, steps: int | None = None) -> list[SimulationStats]:
-        max_steps = steps if steps is not None else self.config.simulation.max_steps
-        if max_steps <= 0:
-            max_steps = float('inf')
-
-        while self.current_step < max_steps:
-            if not self.grazers and not self.rabbits and not self.predators:
-                break
+        limit = steps if steps is not None else self.config.simulation.max_steps
+        if limit is None or limit <= 0:
+            limit = float("inf")
+        while self.current_step < limit and not self.ended:
             self.step()
-
         return self.stats_history
 
+    # ------------------------------------------------------------------ prey
+
+    def _update_prey(self, flock: list, cfg, kind: str) -> None:
+        for prey in flock:
+            if not prey.alive:
+                continue
+
+            was_alive = prey.alive
+            prey.step_energy()
+            if was_alive and not prey.alive:
+                self._record_death(kind)
+
+            if not prey.alive:
+                continue
+
+            herd = self._herd_vectors(prey, self._prey_index, cfg)
+            target = self._forage_target(prey, cfg)
+            self._move_prey(prey, cfg, herd, target)
+            prey.eat(self.env)
+
+    def _herd_vectors(self, prey, index: _SpatialIndex, cfg) -> tuple | None:
+        """Cohesion, alignment and separation from neighbours inside herd_radius.
+
+        Direction vectors use plain grid deltas and plain Chebyshev gaps: the
+        toroidal metric in SPECIFICATION.md is only meaningful for perception
+        radii, and using it here would report herd members as adjacent across the
+        impassable ocean border. Separation points *away* from a neighbour --
+        SPECIFICATION.md line 102 has that sign inverted relative to its own
+        stated intent, "avoid crowding".
+        """
+        py, px = int(prey.y), int(prey.x)
+        radius = cfg.herd_radius
+        cohesion_y = cohesion_x = 0.0
+        alignment_y = alignment_x = 0.0
+        separation_y = separation_x = 0.0
+        seen = 0
+
+        for other in index.query(py - radius, py + radius, px - radius, px + radius):
+            if other is prey or not other.alive:
+                continue
+            oy, ox = int(other.y), int(other.x)
+            gap = max(abs(oy - py), abs(ox - px))
+            if gap > radius:
+                continue
+            seen += 1
+            dy = oy - py
+            dx = ox - px
+            cohesion_y += dy
+            cohesion_x += dx
+            alignment_y += other.last_dy
+            alignment_x += other.last_dx
+            if 0 < gap <= cfg.separation_radius:
+                weight = cfg.separation_radius - gap + 1
+                separation_y += dy * weight
+                separation_x += dx * weight
+
+        if seen == 0:
+            return None
+        return (
+            cohesion_y / seen,
+            cohesion_x / seen,
+            alignment_y / seen,
+            alignment_x / seen,
+            separation_y,
+            separation_x,
+            seen,
+        )
+
+    def _forage_target(self, prey, cfg) -> tuple[int, int]:
+        """Best cell inside the prey's vision disc, scored on resource availability."""
+        py, px = int(prey.y), int(prey.x)
+        radius = max(1, int(prey.vision))
+        y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
+        x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
+
+        window = self._ratios[y0:y1, x0:x1]
+        reachable = self.env.passable[y0:y1, x0:x1]
+        score = np.where(reachable, window, -np.inf)
+
+        # Well-fed prey can afford to prospect away from rich ground.
+        if prey.energy_ratio > 0.8:
+            score = score + np.where(reachable, (1.0 - window) * 0.3, 0.0)
+
+        rows, cols = np.indices(score.shape)
+        score = score - 0.02 * np.maximum(
+            np.abs(rows + y0 - py), np.abs(cols + x0 - px)
+        )
+
+        best = int(np.argmax(score))
+        if not np.isfinite(score.flat[best]):
+            return py, px
+        return y0 + best // score.shape[1], x0 + best % score.shape[1]
+
+    def _threat_vector(self, prey, radius: int) -> tuple[float, float] | None:
+        """Weighted escape direction away from predators inside flee_radius."""
+        if radius <= 0:
+            return None
+        py, px = int(prey.y), int(prey.x)
+        away_y = away_x = 0.0
+        found = False
+        for threat in self._predator_index.query(py - radius, py + radius, px - radius, px + radius):
+            if not threat.alive:
+                continue
+            ty, tx = int(threat.y), int(threat.x)
+            gap = max(abs(ty - py), abs(tx - px))
+            if gap > radius or gap == 0:
+                continue
+            weight = 1.0 / gap
+            away_y += _sign(py - ty) * weight
+            away_x += _sign(px - tx) * weight
+            found = True
+        return (away_y, away_x) if found else None
+
+    def _move_prey(self, prey, cfg, herd: tuple | None, target: tuple[int, int]) -> None:
+        py, px = int(prey.y), int(prey.x)
+        mobility = self.env.mobility_prey[py, px]
+        steps = max(1, int(prey.move_speed * mobility))
+
+        herd_weighted = None
+        if herd is not None and self.rng.random() < cfg.herd_follow_chance:
+            herd_weighted = (
+                herd[0] * cfg.cohesion_weight + herd[2] * cfg.alignment_weight,
+                herd[1] * cfg.cohesion_weight + herd[3] * cfg.alignment_weight,
+                herd[4] * cfg.separation_weight,
+                herd[5] * cfg.separation_weight,
+            )
+
+        gradient_bias = float(np.clip(prey.gradient_weight, 0.0, 1.0))
+        threat = self._threat_vector(prey, cfg.flee_radius)
+
+        for _ in range(steps):
+            ty, tx = target
+            current_to_target = self.distance(py, px, ty, tx)
+            best = None
+            best_score = -np.inf
+
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = py + dy, px + dx
+                    ny, nx = self.env.clamp(ny, nx)
+                    if not self.env.passable[ny, nx]:
+                        continue
+
+                    # Gradient-following pulls toward the forage target; the
+                    # individual's gradient_weight scales how strongly.
+                    approach = current_to_target - self.distance(ny, nx, ty, tx)
+                    score = approach * gradient_bias
+
+                    if herd_weighted is not None:
+                        score += (
+                            dy * herd_weighted[0] + dx * herd_weighted[1]
+                        ) * (1.0 - gradient_bias) * 0.5
+                        score += dy * herd_weighted[2] + dx * herd_weighted[3]
+
+                    # Fleeing outweighs foraging: without this, predators that
+                    # close at 2 cells/step against prey's 1 have no way to lose
+                    # a chase, and prey are harvested to extinction.
+                    if threat is not None:
+                        score += (dy * threat[0] + dx * threat[1]) * cfg.flee_weight
+
+                    # Peak-condition prey tolerates rough, slow terrain.
+                    if prey.energy_ratio > 0.95:
+                        score += (1.0 - self.env.mobility_prey[ny, nx]) * 1.5
+
+                    if score > best_score:
+                        best_score = score
+                        best = (ny, nx, dy, dx)
+
+            if best is None:
+                break
+
+            ny, nx, dy, dx = best
+            moved_y = int(np.sign(ny - py))
+            moved_x = int(np.sign(nx - px))
+            prey.x = float(nx)
+            prey.y = float(ny)
+            prey.record_move(moved_y, moved_x)
+            py, px = ny, nx
+
+    # -------------------------------------------------------------- predators
+
+    def _update_predators(self) -> None:
+        # Reset the transient behaviour label; "feeding" only suppresses movement
+        # for the single step in which a predator actually drew on a carcass.
+        for predator in self.predators:
+            predator.eating_state = "moving"
+
+        # Carcass feeding is resolved as one coordinated pass before any predator
+        # moves, so that every predator around the same carcass competes for one
+        # shared energy store in a deterministic order.
+        self._feed_on_carcasses()
+
+        for predator in self.predators:
+            if not predator.alive:
+                continue
+
+            was_alive = predator.alive
+            predator.step_energy()
+            if was_alive and not predator.alive:
+                self.counters.deaths_predator += 1
+            if not predator.alive:
+                continue
+
+            # Feeding and killing are deliberately separate steps. A kill deposits
+            # a carcass and grants the predator nothing directly; the energy is
+            # only recoverable by scavenging that carcass on a later step. This
+            # also removes the old double-count where a kill paid out both an
+            # immediate energy transfer and a carcass holding part of the same
+            # animal.
+            #
+            # Movement runs before the kill check so a predator that closes on
+            # prey during its chase can kill it on the same step; otherwise it
+            # sweeps over its target and the prey escapes.
+            if predator.eating_state == "feeding":
+                continue
+
+            self._predator_behaviour(predator)
+
+            if self._predator_kill_prey(predator):
+                continue
+
+    def _feed_on_carcasses(self) -> None:
+        """Scavenge pass over every carcass.
+
+        All predators within feed_radius (their own cell plus the eight adjacent
+        ones) draw on the same carcass, so a carcass surrounded by more predators
+        is stripped proportionally faster. Feeding is ordered oldest-first, which
+        decides who gets the remainder when the store runs out mid-pass.
+        """
+        cfg = self.config.carcass
+        per_step = self.config.predator.energy_from_prey / cfg.consumption_divisor
+        radius = max(0, int(cfg.feed_radius))
+
+        for carcass in self.carcasses:
+            if not carcass.provides_energy:
+                continue
+            cy, cx = int(carcass.y), int(carcass.x)
+            feeders = [
+                predator
+                for predator in self._predator_index.query(
+                    cy - radius, cy + radius, cx - radius, cx + radius
+                )
+                if predator.alive
+                and self.distance(int(predator.y), int(predator.x), cy, cx) <= radius
+            ]
+            if not feeders:
+                continue
+
+            # Oldest first; id breaks ties so the outcome is reproducible.
+            feeders.sort(key=lambda p: (-p.age, p.id))
+
+            for predator in feeders:
+                if not carcass.provides_energy:
+                    break
+                taken = carcass.take_energy(per_step)
+                if taken <= 0:
+                    break
+                predator.add_energy(taken)
+                carcass.consumed_by.append(predator.id)
+                predator.eating_state = "feeding"
+
+    def _predator_kill_prey(self, predator: Predator) -> bool:
+        """Kill co-located prey and leave a carcass. No energy is transferred here."""
+        py, px = int(predator.y), int(predator.x)
+        cfg = self.config.predator
+        fraction = self.config.carcass.carcass_energy_fraction
+
+        for flock, kind, kill_counter in (
+            (self.grazers, "grazer", "kills_grazer"),
+            (self.rabbits, "rabbit", "kills_rabbit"),
+        ):
+            for prey in flock:
+                if not prey.alive:
+                    continue
+                if int(prey.y) != py or int(prey.x) != px:
+                    continue
+                prey.alive = False
+                self._record_death(kind)
+                setattr(self.counters, kill_counter, getattr(self.counters, kill_counter) + 1)
+                self.carcasses.append(
+                    Carcass(
+                        x=prey.x,
+                        y=prey.y,
+                        energy=prey.energy * fraction,
+                        max_energy=prey.energy * fraction,
+                        config=self.config.carcass,
+                    )
+                )
+                predator.eating_state = "killing"
+                return True
+        return False
+
+    def _predator_behaviour(self, predator: Predator) -> None:
+        cfg = self.config.predator
+        py, px = int(predator.y), int(predator.x)
+
+        pack = self._pack_mates(predator)
+        pack_center = self._centroid(pack) if pack else None
+
+        mode = "wander"
+        if pack and self.rng.random() < cfg.pack_hunt_chance:
+            mode = "pack_hunt"
+        elif self._solo_target(predator) is not None:
+            mode = "solo"
+
+        if mode == "pack_hunt":
+            target = self._pack_target(predator, pack)
+            if target is not None:
+                flank = pack_center is not None and self.rng.random() < cfg.flank_chance
+                goal = self._flank_goal(target, pack_center) if flank else (
+                    int(target.y),
+                    int(target.x),
+                )
+                self._move_predator_toward(predator, goal[0], goal[1])
+                return
+
+        if mode == "solo":
+            target = self._solo_target(predator)
+            if target is not None:
+                self._move_predator_toward(predator, int(target.y), int(target.x))
+                return
+
+        # No prey in sight: infer their presence from stripped ground.
+        if self._investigate_depletion(predator):
+            return
+
+        if pack and pack_center is not None and self.rng.random() < cfg.pack_wander_chance:
+            self._move_predator_toward(predator, pack_center[0], pack_center[1])
+            return
+
+        self._predator_wander(predator)
+
+    def _pack_mates(self, predator: Predator) -> list[Predator]:
+        radius = self.config.predator.pack_radius
+        py, px = int(predator.y), int(predator.x)
+        mates = []
+        for other in self._predator_index.query(py - radius, py + radius, px - radius, px + radius):
+            if other is predator or not other.alive:
+                continue
+            if self.distance(py, px, int(other.y), int(other.x)) <= radius:
+                mates.append(other)
+        return mates
+
+    def _centroid(self, group: list) -> tuple[int, int]:
+        if not group:
+            return 0, 0
+        ys = [int(m.y) for m in group]
+        xs = [int(m.x) for m in group]
+        return int(round(sum(ys) / len(ys))), int(round(sum(xs) / len(xs)))
+
+    def _prey_vision(self, predator: Predator) -> int:
+        cfg = self.config.predator
+        base = cfg.chase_radius
+        if predator.investigating:
+            base = int(base * cfg.vision_boost_on_investigate)
+        return self.env.effective_vision(
+            int(predator.y), int(predator.x), base, predator=True
+        )
+
+    def _solo_target(self, predator: Predator):
+        vision = self._prey_vision(predator)
+        py, px = int(predator.y), int(predator.x)
+        best = None
+        best_distance = float("inf")
+        for prey in self._prey_index.query(py - vision, py + vision, px - vision, px + vision):
+            if not prey.alive:
+                continue
+            gap = self.distance(py, px, int(prey.y), int(prey.x))
+            if gap <= vision and gap < best_distance:
+                best, best_distance = prey, gap
+        return best
+
+    def _pack_target(self, predator: Predator, pack: list):
+        """SPECIFICATION.md: score = (chase_radius + 5 - distance) + nearby_predators * 3."""
+        cfg = self.config.predator
+        py, px = int(predator.y), int(predator.x)
+        vision = self._prey_vision(predator)
+        pack_positions = [(int(m.y), int(m.x)) for m in pack]
+
+        best = None
+        best_score = -float("inf")
+        for prey in self._prey_index.query(py - vision, py + vision, px - vision, px + vision):
+            if not prey.alive:
+                continue
+            ty, tx = int(prey.y), int(prey.x)
+            gap = self.distance(py, px, ty, tx)
+            if gap > vision:
+                continue
+            escorts = sum(
+                1
+                for my, mx in pack_positions
+                if self.distance(my, mx, ty, tx) <= cfg.pack_radius
+            )
+            score = (cfg.chase_radius + 5 - gap) + escorts * cfg.pack_score_bonus
+            if score > best_score:
+                best, best_score = prey, score
+        return best
+
+    def _flank_goal(self, prey, pack_center: tuple[int, int]) -> tuple[int, int]:
+        """Approach from the side of the prey facing away from the pack centre."""
+        ty, tx = int(prey.y), int(prey.x)
+        cy, cx = pack_center
+        return ty + _sign(ty - cy), tx + _sign(tx - cx)
+
+    def _investigate_depletion(self, predator: Predator) -> bool:
+        """Resource sensing: head for freshly stripped ground inside sense radius."""
+        cfg = self.config.predator
+        py, px = int(predator.y), int(predator.x)
+
+        if predator.investigating:
+            predator.investigate_timer -= 1
+            if predator.investigate_timer <= 0:
+                predator.clear_investigation()
+            else:
+                self._move_predator_toward(
+                    predator, predator.investigate_y, predator.investigate_x
+                )
+                return True
+
+        radius = max(1, int(cfg.resource_sense_radius))
+        radius = int(radius * self.env.visibility(py, px, predator=True))
+        y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
+        x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
+
+        ratios = self._ratios[y0:y1, x0:x1]
+        depletion = self.env.depletion_rate[y0:y1, x0:x1]
+        reachable = self.env.passable[y0:y1, x0:x1]
+
+        evidence = np.where(
+            reachable & (ratios <= cfg.depleted_ratio_threshold), depletion, 0.0
+        )
+        if float(evidence.max()) < cfg.investigate_threshold:
+            return False
+
+        best = int(np.argmax(evidence))
+        predator.begin_investigation(
+            y0 + best // evidence.shape[1],
+            x0 + best % evidence.shape[1],
+            cfg.investigate_steps,
+        )
+        self._move_predator_toward(
+            predator, predator.investigate_y, predator.investigate_x
+        )
+        return True
+
+    def _move_predator_toward(self, predator: Predator, ty: int, tx: int) -> None:
+        py, px = int(predator.y), int(predator.x)
+        mobility = self.env.mobility_predator[py, px]
+        steps = max(1, int(predator.move_speed * mobility))
+
+        for _ in range(steps):
+            gap = self.distance(py, px, ty, tx)
+            if gap == 0:
+                break
+            best = None
+            best_gap = gap
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = self.env.clamp(py + dy, px + dx)
+                    if not self.env.passable[ny, nx]:
+                        continue
+                    candidate_gap = self.distance(ny, nx, ty, tx)
+                    if candidate_gap < best_gap:
+                        best_gap = candidate_gap
+                        best = (ny, nx)
+            if best is None:
+                break
+            moved_y = int(np.sign(best[0] - py))
+            moved_x = int(np.sign(best[1] - px))
+            predator.y = float(best[0])
+            predator.x = float(best[1])
+            predator.record_move(moved_y, moved_x)
+            py, px = best
+
+    def _predator_wander(self, predator: Predator) -> None:
+        py, px = int(predator.y), int(predator.x)
+        mobility = self.env.mobility_predator[py, px]
+        steps = max(1, int(predator.move_speed * mobility))
+
+        for _ in range(steps):
+            best = None
+            best_score = -float("inf")
+            for dy in (-1, 0, 1):
+                for dx in (-1, 0, 1):
+                    if dy == 0 and dx == 0:
+                        continue
+                    ny, nx = self.env.clamp(py + dy, px + dx)
+                    if not self.env.passable[ny, nx]:
+                        continue
+                    centre = max(
+                        abs(ny - self.map_height // 2), abs(nx - self.map_width // 2)
+                    )
+                    score = self._ratios[ny, nx] - centre * 0.01
+                    if score > best_score:
+                        best_score = score
+                        best = (ny, nx)
+            if best is None:
+                break
+            moved_y = int(np.sign(best[0] - py))
+            moved_x = int(np.sign(best[1] - px))
+            predator.y = float(best[0])
+            predator.x = float(best[1])
+            predator.record_move(moved_y, moved_x)
+            py, px = best
+
+    # ------------------------------------------------------------ reproduction
+
+    def _reproduce(self) -> None:
+        self.grazers.extend(
+            offspring
+            for parent in list(self.grazers)
+            if parent.alive
+            for offspring in [self._try_reproduce(parent, self.config.grazer)]
+            if offspring is not None
+        )
+        self.rabbits.extend(
+            offspring
+            for parent in list(self.rabbits)
+            if parent.alive
+            for offspring in [self._try_reproduce(parent, self.config.rabbit)]
+            if offspring is not None
+        )
+        self.predators.extend(
+            offspring
+            for parent in list(self.predators)
+            if parent.alive
+            for offspring in [self._try_reproduce(parent, self.config.predator)]
+            if offspring is not None
+        )
+
+    def _try_reproduce(self, parent, cfg):
+        """SPECIFICATION.md: cost is a fraction of the parent's *current* energy."""
+        if parent.age < cfg.reproduction_min_age or parent.energy < cfg.reproduction_min_energy:
+            return None
+        cost = parent.energy * cfg.reproduction_energy_cost
+        parent.energy -= cost
+
+        py, px = int(parent.y), int(parent.x)
+        oy = py + int(self.rng.integers(-1, 2))
+        ox = px + int(self.rng.integers(-1, 2))
+        oy, ox = self.env.clamp(oy, ox)
+
+        energy = float(cfg.offspring_initial_energy)
+        if isinstance(parent, Grazer):
+            child = Grazer(x=float(ox), y=float(oy), energy=energy, config=cfg)
+            child.inherited_gradient_weight = parent.inherited_gradient_weight
+            child.mutate_gradient_weight(self.rng)
+            self.counters.births_grazer += 1
+        elif isinstance(parent, Rabbit):
+            child = Rabbit(x=float(ox), y=float(oy), energy=energy, config=cfg)
+            child.inherited_gradient_weight = parent.inherited_gradient_weight
+            child.mutate_gradient_weight(self.rng)
+            self.counters.births_rabbit += 1
+        else:
+            child = Predator(x=float(ox), y=float(oy), energy=energy, config=cfg)
+            self.counters.births_predator += 1
+        return child
+
+    def _record_death(self, kind: str) -> None:
+        if kind == "grazer":
+            self.counters.deaths_grazer += 1
+        else:
+            self.counters.deaths_rabbit += 1
+
+    def _cleanup(self) -> None:
+        self.grazers = [g for g in self.grazers if g.alive]
+        self.rabbits = [r for r in self.rabbits if r.alive]
+        self.predators = [p for p in self.predators if p.alive]
+        self.carcasses = [c for c in self.carcasses if c.provides_energy]
+
+    # -------------------------------------------------------------- reporting
+
+    def _record_stats(self) -> SimulationStats:
+        grazers, rabbits, predators = self.grazers, self.rabbits, self.predators
+        live_carcasses = [c for c in self.carcasses if c.provides_energy]
+
+        stats = SimulationStats(
+            step=self.current_step,
+            grazer_count=len(grazers),
+            rabbit_count=len(rabbits),
+            predator_count=len(predators),
+            carcass_count=len(live_carcasses),
+            births_grazer=self.counters.births_grazer,
+            births_rabbit=self.counters.births_rabbit,
+            births_predator=self.counters.births_predator,
+            deaths_grazer=self.counters.deaths_grazer,
+            deaths_rabbit=self.counters.deaths_rabbit,
+            deaths_predator=self.counters.deaths_predator,
+            kills_grazer=self.counters.kills_grazer,
+            kills_rabbit=self.counters.kills_rabbit,
+        )
+        stats.total_grazer_energy = float(sum(g.energy for g in grazers))
+        stats.total_rabbit_energy = float(sum(r.energy for r in rabbits))
+        stats.total_predator_energy = float(sum(p.energy for p in predators))
+        stats.total_carcass_energy = float(sum(c.energy for c in live_carcasses))
+        stats.total_resource = self.env.total_resource()
+
+        if grazers:
+            stats.avg_grazer_energy = stats.total_grazer_energy / len(grazers)
+        if rabbits:
+            stats.avg_rabbit_energy = stats.total_rabbit_energy / len(rabbits)
+        if predators:
+            stats.avg_predator_energy = stats.total_predator_energy / len(predators)
+        return stats
+
     def get_state(self) -> dict:
+        terrain, resources = self.env.as_lists()
         return {
             "step": self.current_step,
             "grazers": [
-                {"id": g.id, "x": g.x, "y": g.y, "energy": g.energy, "fat": g.fat, "alive": g.alive}
-                for g in self.grazers if g.alive
+                {"id": g.id, "x": g.x, "y": g.y, "energy": g.energy, "age": g.age}
+                for g in self.grazers
             ],
             "rabbits": [
-                {"id": r.id, "x": r.x, "y": r.y, "energy": r.energy, "eating_state": r.eating_state, "alive": r.alive}
-                for r in self.rabbits if r.alive
+                {"id": r.id, "x": r.x, "y": r.y, "energy": r.energy, "age": r.age}
+                for r in self.rabbits
             ],
             "predators": [
-                {"id": p.id, "x": p.x, "y": p.y, "energy": p.energy, "eating_state": p.eating_state, "alive": p.alive}
-                for p in self.predators if p.alive
+                {"id": p.id, "x": p.x, "y": p.y, "energy": p.energy, "age": p.age}
+                for p in self.predators
             ],
             "carcasses": [
                 {"id": c.id, "x": c.x, "y": c.y, "energy": c.energy}
-                for c in self.carcasses if c.can_provide_energy()
+                for c in self.carcasses
+                if c.provides_energy
             ],
-            "resources": self.env.resources.tolist(),
-            "terrain": self.env.terrain.tolist(),
+            "resources": resources,
+            "terrain": terrain,
         }
 
     def get_statistics(self) -> dict:
-        """Get simulation statistics for UI display."""
         return {
-            "grazers": len([g for g in self.grazers if g.alive]),
-            "rabbits": len([r for r in self.rabbits if r.alive]),
-            "predators": len([p for p in self.predators if p.alive]),
-            "total_grass": float(np.sum(self.env.resources)),
-            "grazers_list": [g for g in self.grazers if g.alive],
-            "rabbits_list": [r for r in self.rabbits if r.alive],
-            "predators_list": [p for p in self.predators if p.alive],
+            "grazers": len(self.grazers),
+            "rabbits": len(self.rabbits),
+            "predators": len(self.predators),
+            "carcasses": len([c for c in self.carcasses if c.provides_energy]),
+            "total_resource": self.env.total_resource(),
+            "grazers_list": list(self.grazers),
+            "rabbits_list": list(self.rabbits),
+            "predators_list": list(self.predators),
         }
+
+    def extinction_summary(self) -> str:
+        peak = {
+            "grazer": max((s.grazer_count for s in self.stats_history), default=0),
+            "rabbit": max((s.rabbit_count for s in self.stats_history), default=0),
+            "predator": max((s.predator_count for s in self.stats_history), default=0),
+        }
+        return "\n".join(
+            [
+                "=== SIMULATION ENDED (all species extinct) ===",
+                f"Final step: {self.current_step}",
+                f"Births   grazer={self.counters.births_grazer} "
+                f"rabbit={self.counters.births_rabbit} "
+                f"predator={self.counters.births_predator}",
+                f"Deaths   grazer={self.counters.deaths_grazer} "
+                f"rabbit={self.counters.deaths_rabbit} "
+                f"predator={self.counters.deaths_predator}",
+                f"Kills    grazer={self.counters.kills_grazer} "
+                f"rabbit={self.counters.kills_rabbit}",
+                f"Peak     grazer={peak['grazer']} "
+                f"rabbit={peak['rabbit']} "
+                f"predator={peak['predator']}",
+            ]
+        )

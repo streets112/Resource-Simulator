@@ -1,18 +1,19 @@
 from simulator.config import Config, load_config, save_config
 from simulator.environment import Environment
-from simulator.entities import Entity, Grazer, Predator
+from simulator.entities import Carcass, Entity, Grazer, Prey, Predator, Rabbit
 from simulator.simulation import Simulation, SimulationStats
-from simulator.render import Renderer
 
 __all__ = [
+    "Carcass",
     "Config",
-    "load_config",
-    "save_config",
-    "Environment",
     "Entity",
+    "Environment",
     "Grazer",
+    "load_config",
+    "Prey",
     "Predator",
+    "Rabbit",
+    "save_config",
     "Simulation",
     "SimulationStats",
-    "Renderer",
 ]

@@ -1,7 +1,10 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
+
 import yaml
+
+DEFAULT_OCEAN_BORDER = 5
 
 
 @dataclass
@@ -30,12 +33,16 @@ class EnvironmentConfig:
     terrain_types: dict[str, TerrainConfig]
     terrain_distribution: dict[str, float]
     resource_diffusion_rate: float
-    ocean_border_width: int = 5
-    grass_regrowth_rate: float = 0.02
+    ocean_border_width: int = DEFAULT_OCEAN_BORDER
+    regen_base_factor: float = 0.025
+    depletion_threshold: float = 0.6
+    depletion_suppression: float = 2.2
+    min_regen_suppression: float = 0.25
+    depletion_signal_smoothing: float = 0.7
 
 
 @dataclass
-class GrazerConfig:
+class PreyConfig:
     initial_count: int
     max_energy: float
     energy_per_step: float
@@ -48,23 +55,25 @@ class GrazerConfig:
     gradient_weight: float
     gradient_weight_std: float
     vision_radius: int
-    max_fat: float = 500.0
+    herd_radius: int = 8
+    separation_radius: int = 2
+    herd_follow_chance: float = 0.7
+    cohesion_weight: float = 0.4
+    alignment_weight: float = 0.3
+    separation_weight: float = 0.3
+    flee_radius: int = 5
+    flee_weight: float = 3.0
+    min_efficiency: float = 0.3
 
 
 @dataclass
-class RabbitConfig:
-    initial_count: int
-    max_energy: float
-    energy_per_step: float
-    energy_from_resource: float
-    reproduction_min_age: int
-    reproduction_min_energy: float
-    reproduction_energy_cost: float
-    offspring_initial_energy: float
-    move_speed: int
-    gradient_weight: float
-    gradient_weight_std: float
-    vision_radius: int
+class GrazerConfig(PreyConfig):
+    pass
+
+
+@dataclass
+class RabbitConfig(PreyConfig):
+    pass
 
 
 @dataclass
@@ -80,6 +89,24 @@ class PredatorConfig:
     move_speed: int
     chase_radius: int
     resource_sense_radius: int
+    pack_radius: int = 10
+    pack_hunt_chance: float = 0.6
+    flank_chance: float = 0.4
+    pack_wander_chance: float = 0.5
+    pack_score_bonus: float = 3.0
+    depleted_ratio_threshold: float = 0.3
+    investigate_steps: int = 12
+    investigate_threshold: float = 0.02
+    vision_boost_on_investigate: float = 1.5
+
+
+@dataclass
+class CarcassConfig:
+    decay_rate: float = 0.98
+    min_energy: float = 1.0
+    carcass_energy_fraction: float = 0.5
+    consumption_divisor: float = 10.0
+    feed_radius: int = 1
 
 
 @dataclass
@@ -108,31 +135,48 @@ class Config:
     grazer: GrazerConfig
     rabbit: RabbitConfig
     predator: PredatorConfig
+    carcass: CarcassConfig
     visualization: VisualizationConfig
     output: OutputConfig
 
 
+def _build(cls: type, raw: dict[str, Any] | None) -> Any:
+    """Instantiate a dataclass from a mapping, ignoring keys the dataclass does not declare."""
+    raw = raw or {}
+    accepted = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in raw.items() if k in accepted})
+
+
 def load_config(path: str | Path = "config.yaml") -> Config:
     with open(path) as f:
-        raw = yaml.safe_load(f)
+        raw = yaml.safe_load(f) or {}
 
-    sim = SimConfig(**raw["simulation"])
+    sim_raw = dict(raw.get("simulation", {}))
+    sim_raw.setdefault("timestep_ms", 100)
+    sim_raw.setdefault("max_steps", 0)
+    sim = _build(SimConfig, sim_raw)
 
-    env_terrains = {
-        k: TerrainConfig(**v) for k, v in raw["environment"]["terrain_types"].items()
+    env_raw = dict(raw.get("environment", {}))
+    terrains = {
+        name: _build(TerrainConfig, body)
+        for name, body in env_raw.get("terrain_types", {}).items()
     }
-    env = EnvironmentConfig(
-        terrain_types=env_terrains,
-        terrain_distribution=raw["environment"]["terrain_distribution"],
-        resource_diffusion_rate=raw["environment"]["resource_diffusion_rate"],
-        ocean_border_width=raw["environment"].get("ocean_border_width", 5),
+    env = _build(
+        EnvironmentConfig,
+        {
+            "terrain_types": terrains,
+            "terrain_distribution": env_raw.get("terrain_distribution", {}),
+            "resource_diffusion_rate": env_raw.get("resource_diffusion_rate", 0.1),
+            "ocean_border_width": env_raw.get("ocean_border_width", DEFAULT_OCEAN_BORDER),
+        },
     )
 
-    grazer = GrazerConfig(**raw["grazer"])
-    rabbit = RabbitConfig(**raw["rabbit"])
-    predator = PredatorConfig(**raw["predator"])
-    viz = VisualizationConfig(**raw["visualization"])
-    output = OutputConfig(**raw["output"])
+    grazer = _build(GrazerConfig, raw.get("grazer"))
+    rabbit = _build(RabbitConfig, raw.get("rabbit"))
+    predator = _build(PredatorConfig, raw.get("predator"))
+    carcass = _build(CarcassConfig, raw.get("carcass"))
+    viz = _build(VisualizationConfig, raw.get("visualization"))
+    output = _build(OutputConfig, raw.get("output"))
 
     return Config(
         simulation=sim,
@@ -140,26 +184,42 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         grazer=grazer,
         rabbit=rabbit,
         predator=predator,
+        carcass=carcass,
         visualization=viz,
         output=output,
     )
 
 
+def _dump(obj: Any) -> Any:
+    if hasattr(obj, "__dataclass_fields__"):
+        return {name: _dump(getattr(obj, name)) for name in obj.__dataclass_fields__}
+    if isinstance(obj, dict):
+        return {k: _dump(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_dump(v) for v in obj]
+    return obj
+
+
 def save_config(config: Config, path: str | Path = "config.yaml") -> None:
-    raw = {
-        "simulation": config.simulation.__dict__,
+    payload = {
+        "simulation": _dump(config.simulation),
         "environment": {
-            "terrain_types": {
-                k: v.__dict__ for k, v in config.environment.terrain_types.items()
-            },
+            "terrain_types": _dump(config.environment.terrain_types),
             "terrain_distribution": config.environment.terrain_distribution,
             "resource_diffusion_rate": config.environment.resource_diffusion_rate,
+            "ocean_border_width": config.environment.ocean_border_width,
+            "regen_base_factor": config.environment.regen_base_factor,
+            "depletion_threshold": config.environment.depletion_threshold,
+            "depletion_suppression": config.environment.depletion_suppression,
+            "min_regen_suppression": config.environment.min_regen_suppression,
+            "depletion_signal_smoothing": config.environment.depletion_signal_smoothing,
         },
-        "grazer": config.grazer.__dict__,
-        "rabbit": config.rabbit.__dict__,
-        "predator": config.predator.__dict__,
-        "visualization": config.visualization.__dict__,
-        "output": config.output.__dict__,
+        "grazer": _dump(config.grazer),
+        "rabbit": _dump(config.rabbit),
+        "predator": _dump(config.predator),
+        "carcass": _dump(config.carcass),
+        "visualization": _dump(config.visualization),
+        "output": _dump(config.output),
     }
     with open(path, "w") as f:
-        yaml.dump(raw, f, default_flow_style=False)
+        yaml.dump(payload, f, default_flow_style=False, sort_keys=False)

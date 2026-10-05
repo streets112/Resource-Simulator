@@ -1,5 +1,11 @@
 import numpy as np
-from simulator.config import EnvironmentConfig, TerrainConfig
+from scipy.ndimage import convolve as nd_convolve
+from scipy.ndimage import distance_transform_edt, label
+
+from simulator.config import EnvironmentConfig
+
+_NEIGHBOUR_KERNEL = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.float64)
+_LAPLACIAN_KERNEL = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=np.float64)
 
 
 class Environment:
@@ -9,415 +15,368 @@ class Environment:
         self.height = height
         self.rng = np.random.default_rng(seed)
 
-        self.terrain = np.empty((height, width), dtype=object)
-        self.resources = np.zeros((height, width), dtype=np.float32)
-        self.resource_capacity = np.zeros((height, width), dtype=np.float32)
-        self.regen_rate = np.zeros((height, width), dtype=np.float32)
+        self.ocean_border = config.ocean_border_width
+
+        # Terrain is stored as indices into self.terrain_names so that whole-map
+        # operations (smoothing, expansion, masking) stay vectorised.
+        self.terrain_names = list(config.terrain_types.keys())
+        self._terrain_index = {name: i for i, name in enumerate(self.terrain_names)}
+        self.terrain = np.zeros((height, width), dtype=np.int8)
+
+        self.resources = np.zeros((height, width), dtype=np.float64)
+        self.resource_capacity = np.zeros((height, width), dtype=np.float64)
+        self.regen_rate = np.zeros((height, width), dtype=np.float64)
         self.passable = np.zeros((height, width), dtype=bool)
+        self.mobility_prey = np.zeros((height, width), dtype=np.float64)
+        self.mobility_predator = np.zeros((height, width), dtype=np.float64)
+
+        # Fractional resource loss since the previous regeneration pass, smoothed.
+        # Fresh grazing lights this up; a steadily depleted cell settles to ~0.
+        self.depletion_rate = np.zeros((height, width), dtype=np.float64)
 
         self._generate_terrain_biomes()
+        self._snapshot_resources()
         self._initialize_resources()
 
+    # ------------------------------------------------------------------ terrain
+
     def _generate_terrain_biomes(self) -> None:
-        terrain_names = list(self.config.terrain_types.keys())
-        self.ocean_border = self.config.ocean_border_width
+        names = self.terrain_names
 
-        base_noise = self._generate_fractal_noise(octaves=5, persistence=0.5, scale=0.015)
-        ridge_noise = self._generate_ridge_noise(octaves=4, persistence=0.5, scale=0.02)
-        forest_noise = self._generate_fractal_noise(octaves=4, persistence=0.6, scale=0.01)
-        detail_noise = self._generate_fractal_noise(octaves=3, persistence=0.5, scale=0.05)
+        base_noise = self._fractal(octaves=5, persistence=0.5, scale=0.015)
+        ridge_noise = self._ridge(octaves=4, persistence=0.5, scale=0.02)
+        forest_noise = self._fractal(octaves=4, persistence=0.6, scale=0.01)
+        detail_noise = self._fractal(octaves=3, persistence=0.5, scale=0.05)
 
-        base_noise = (base_noise - base_noise.min()) / (base_noise.max() - base_noise.min())
-        ridge_noise = (ridge_noise - ridge_noise.min()) / (ridge_noise.max() - ridge_noise.min())
-        forest_noise = (forest_noise - forest_noise.min()) / (forest_noise.max() - forest_noise.min())
-        detail_noise = (detail_noise - detail_noise.min()) / (detail_noise.max() - detail_noise.min())
+        mountain_score = ridge_noise * 0.7 + detail_noise * 0.2 + self._directional_bias() * 0.1
+        mountain_score = _normalize(mountain_score)
+        mountain_mask = mountain_score > 0.38
+        mountain_mask = self._thin_ridges(mountain_mask)
+        mountain_mask = self._drop_small_components(mountain_mask, min_size=5)
 
-        mountain_mask = self._create_mountain_ridges(ridge_noise, detail_noise)
         forest_mask = self._create_forest_patches(forest_noise, base_noise, mountain_mask)
         plains_mask = ~(mountain_mask | forest_mask)
 
-        self.terrain[mountain_mask] = 'rock'
-        self.terrain[forest_mask] = 'forest'
-        self.terrain[plains_mask] = 'plains'
+        self.terrain[mountain_mask] = self._terrain_index["rock"]
+        self.terrain[forest_mask] = self._terrain_index["forest"]
+        self.terrain[plains_mask] = self._terrain_index["plains"]
 
-        self.terrain = self._smooth_terrain(self.terrain, terrain_names, iterations=1)
-
+        self.terrain = self._smooth_terrain(self.terrain, names, iterations=1)
         self._carve_mountain_passes(mountain_mask)
+        self._apply_ocean_border()
+        self.refresh_terrain_properties()
 
-        # Add ocean border around the map
-        self._add_ocean_border()
-
-        for name, tcfg in self.config.terrain_types.items():
-            mask = self.terrain == name
-            self.resource_capacity[mask] = tcfg.resource_capacity
-            self.regen_rate[mask] = tcfg.resource_regen_rate
-            self.passable[mask] = tcfg.passable
-
-    def _generate_fractal_noise(self, octaves: int = 4, persistence: float = 0.5, scale: float = 0.02) -> np.ndarray:
-        h, w = self.height, self.width
-        noise = np.zeros((h, w), dtype=np.float32)
+    def _fractal(self, octaves: int, persistence: float, scale: float) -> np.ndarray:
+        total = np.zeros((self.height, self.width), dtype=np.float64)
         amplitude = 1.0
         frequency = scale
-        max_amplitude = 0.0
-
+        norm = 0.0
         for _ in range(octaves):
-            perlin = self._perlin_noise_2d(h, w, frequency)
-            noise += perlin * amplitude
-            max_amplitude += amplitude
+            total += self._perlin(frequency) * amplitude
+            norm += amplitude
             amplitude *= persistence
-            frequency *= 2
+            frequency *= 2.0
+        return total / norm
 
-        return noise / max_amplitude
-
-    def _generate_ridge_noise(self, octaves: int = 4, persistence: float = 0.5, scale: float = 0.02) -> np.ndarray:
-        h, w = self.height, self.width
-        noise = np.zeros((h, w), dtype=np.float32)
+    def _ridge(self, octaves: int, persistence: float, scale: float) -> np.ndarray:
+        total = np.zeros((self.height, self.width), dtype=np.float64)
         amplitude = 1.0
         frequency = scale
-        max_amplitude = 0.0
-
+        norm = 0.0
         for _ in range(octaves):
-            perlin = self._perlin_noise_2d(h, w, frequency)
-            ridges = 1.0 - np.abs(perlin)
-            ridges = ridges * ridges
-            noise += ridges * amplitude
-            max_amplitude += amplitude
+            ridges = 1.0 - np.abs(self._perlin(frequency))
+            total += (ridges * ridges) * amplitude
+            norm += amplitude
             amplitude *= persistence
-            frequency *= 2
+            frequency *= 2.0
+        return total / norm
 
-        return noise / max_amplitude
+    def _directional_bias(self) -> np.ndarray:
+        angle = self.rng.uniform(0.0, 2.0 * np.pi)
+        x = np.linspace(0.0, 1.0, self.width)
+        y = np.linspace(0.0, 1.0, self.height)
+        grid_x, grid_y = np.meshgrid(x, y)
+        bias = (grid_x * np.cos(angle) + grid_y * np.sin(angle)) * 0.5 + 0.5
+        bias = bias + np.sin(grid_x * 20.0 + self.rng.uniform(0, 2 * np.pi)) * 0.1
+        bias = bias + np.cos(grid_y * 15.0 + self.rng.uniform(0, 2 * np.pi)) * 0.1
+        return bias
 
-    def _create_mountain_ridges(self, ridge_noise: np.ndarray, detail_noise: np.ndarray) -> np.ndarray:
+    def _perlin(self, scale: float) -> np.ndarray:
         h, w = self.height, self.width
-
-        directional_bias = self._generate_directional_bias()
-
-        mountain_score = ridge_noise * 0.7 + detail_noise * 0.2 + directional_bias * 0.1
-
-        mountain_score = (mountain_score - mountain_score.min()) / (mountain_score.max() - mountain_score.min())
-
-        mountain_threshold = 0.38
-        mountain_mask = mountain_score > mountain_threshold
-
-        mountain_mask = self._thin_ridges(mountain_score, mountain_mask)
-
-        mountain_mask = self._connect_ridge_segments(mountain_mask)
-
-        return mountain_mask
-
-    def _generate_directional_bias(self) -> np.ndarray:
-        h, w = self.height, self.width
-        angle = self.rng.uniform(0, 2 * np.pi)
-        dir_x = np.cos(angle)
-        dir_y = np.sin(angle)
-
-        x = np.linspace(0, 1, w)
-        y = np.linspace(0, 1, h)
-        X, Y = np.meshgrid(x, y)
-
-        bias = (X * dir_x + Y * dir_y) * 0.5 + 0.5
-
-        wave_x = np.sin(X * 20 + self.rng.uniform(0, 2*np.pi)) * 0.1
-        wave_y = np.cos(Y * 15 + self.rng.uniform(0, 2*np.pi)) * 0.1
-
-        return bias + wave_x + wave_y
-
-    def _thin_ridges(self, mountain_score: np.ndarray, mountain_mask: np.ndarray) -> np.ndarray:
-        h, w = mountain_mask.shape
-        thinned = mountain_mask.copy()
-
-        for y in range(h):
-            for x in range(w):
-                if mountain_mask[y, x]:
-                    neighbors = 0
-                    for dy in [-1, 0, 1]:
-                        for dx in [-1, 0, 1]:
-                            if dy == 0 and dx == 0:
-                                continue
-                            ny = (y + dy) % h
-                            nx = (x + dx) % w
-                            if mountain_mask[ny, nx]:
-                                neighbors += 1
-                    if neighbors < 2:
-                        thinned[y, x] = False
-
-        return thinned
-
-    def _connect_ridge_segments(self, mountain_mask: np.ndarray) -> np.ndarray:
-        h, w = mountain_mask.shape
-        connected = mountain_mask.copy()
-
-        from scipy.ndimage import label
-        labeled, num_features = label(mountain_mask, structure=[[1,1,1],[1,1,1],[1,1,1]])
-
-        for i in range(1, num_features + 1):
-            component = (labeled == i)
-            if component.sum() < 5:
-                connected[component] = False
-
-        return connected
-
-    def _create_forest_patches(self, forest_noise: np.ndarray, base_noise: np.ndarray, mountain_mask: np.ndarray) -> np.ndarray:
-        h, w = self.height, self.width
-
-        mountain_distance = self._compute_mountain_distance(mountain_mask)
-        mountain_proximity = 1.0 - np.clip(mountain_distance / 8.0, 0, 1)
-
-        forest_score = forest_noise * 0.5 + (1 - base_noise) * 0.3 + mountain_proximity * 0.2
-
-        forest_score = (forest_score - forest_score.min()) / (forest_score.max() - forest_score.min())
-
-        forest_threshold = 0.55
-        forest_mask = (forest_score > forest_threshold) & ~mountain_mask
-
-        forest_mask = self._expand_forests_natural(forest_mask, mountain_mask, iterations=3)
-
-        return forest_mask
-
-    def _compute_mountain_distance(self, mountain_mask: np.ndarray) -> np.ndarray:
-        from scipy.ndimage import distance_transform_edt
-        return distance_transform_edt(~mountain_mask)
-
-    def _expand_forests_natural(self, forest_mask: np.ndarray, mountain_mask: np.ndarray, iterations: int = 3) -> np.ndarray:
-        h, w = forest_mask.shape
-        expanded = forest_mask.copy()
-
-        mountain_distance = self._compute_mountain_distance(mountain_mask)
-
-        for _ in range(iterations):
-            new_expanded = expanded.copy()
-            for y in range(h):
-                for x in range(w):
-                    if not expanded[y, x] and not mountain_mask[y, x]:
-                        forest_neighbors = 0
-                        for dy in [-1, 0, 1]:
-                            for dx in [-1, 0, 1]:
-                                if dy == 0 and dx == 0:
-                                    continue
-                                ny = (y + dy) % h
-                                nx = (x + dx) % w
-                                if expanded[ny, nx]:
-                                    forest_neighbors += 1
-                        dist = mountain_distance[y, x]
-                        if forest_neighbors >= 4 or (forest_neighbors >= 3 and dist < 6):
-                            new_expanded[y, x] = True
-            expanded = new_expanded
-
-        return expanded
-
-    def _add_ocean_border(self) -> None:
-        """Add ocean border around the map."""
-        border = self.ocean_border
-        
-        # Top border
-        self.terrain[:border, :] = 'ocean'
-        # Bottom border
-        self.terrain[-border:, :] = 'ocean'
-        # Left border
-        self.terrain[:, :border] = 'ocean'
-        # Right border
-        self.terrain[:, -border:] = 'ocean'
-
-    def _carve_mountain_passes(self, mountain_mask: np.ndarray) -> None:
-        h, w = self.height, self.width
-
-        from scipy.ndimage import label, distance_transform_edt
-        labeled, num_features = label(mountain_mask, structure=[[1,1,1],[1,1,1],[1,1,1]])
-
-        for i in range(1, num_features + 1):
-            component = (labeled == i)
-            if component.sum() > 200:
-                dist = distance_transform_edt(component)
-                thinnest = np.unravel_index(np.argmin(dist), dist.shape)
-                y, x = thinnest
-
-                if dist[y, x] < 8:
-                    self._carve_pass_at(y, x, mountain_mask, width=2)
-
-    def _carve_pass_at(self, cy: int, cx: int, mountain_mask: np.ndarray, width: int = 2) -> None:
-        h, w = self.height, self.width
-
-        for dy in range(-width, width + 1):
-            for dx in range(-width, width + 1):
-                if dy*dy + dx*dx <= width*width:
-                    ny = cy + dy
-                    nx = cx + dx
-                    if 0 <= ny < h and 0 <= nx < w:
-                        self.terrain[ny, nx] = 'plains'
-
-        extended_width = width + 2
-        for dy in range(-extended_width, extended_width + 1):
-            for dx in range(-extended_width, extended_width + 1):
-                if width*width < dy*dy + dx*dx <= extended_width*extended_width:
-                    ny = cy + dy
-                    nx = cx + dx
-                    if 0 <= ny < h and 0 <= nx < w:
-                        if self.terrain[ny, nx] == 'rock':
-                            self.terrain[ny, nx] = 'plains'
-
-    def _perlin_noise_2d(self, h: int, w: int, scale: float) -> np.ndarray:
         grid_x = int(w * scale) + 1
         grid_y = int(h * scale) + 1
 
-        gradients = self.rng.uniform(-1, 1, (grid_y, grid_x, 2))
-        norms = np.linalg.norm(gradients, axis=2, keepdims=True)
-        gradients = gradients / (norms + 1e-8)
+        gradients = self.rng.uniform(-1.0, 1.0, (grid_y, grid_x, 2))
+        gradients /= np.linalg.norm(gradients, axis=2, keepdims=True) + 1e-8
 
-        x = np.linspace(0, w * scale, w)
-        y = np.linspace(0, h * scale, h)
-        X, Y = np.meshgrid(x, y)
+        x = np.linspace(0.0, w * scale, w)
+        y = np.linspace(0.0, h * scale, h)
+        mesh_x, mesh_y = np.meshgrid(x, y)
 
-        x0 = np.floor(X).astype(int)
-        y0 = np.floor(Y).astype(int)
+        x0 = np.floor(mesh_x).astype(int)
+        y0 = np.floor(mesh_y).astype(int)
         x1 = (x0 + 1) % grid_x
         y1 = (y0 + 1) % grid_y
 
-        sx = X - x0
-        sy = Y - y0
+        sx = mesh_x - x0
+        sy = mesh_y - y0
+        u = sx * sx * (3.0 - 2.0 * sx)
+        v = sy * sy * (3.0 - 2.0 * sy)
 
-        u = sx * sx * (3 - 2 * sx)
-        v = sy * sy * (3 - 2 * sy)
+        def dot(ix, iy):
+            gx = gradients[iy, ix, 0]
+            gy = gradients[iy, ix, 1]
+            return gx * (mesh_x - ix / scale) + gy * (mesh_y - iy / scale)
 
-        def dot_grad(ix, iy):
-            gx, gy = gradients[iy, ix, 0], gradients[iy, ix, 1]
-            dx = X - ix / scale
-            dy = Y - iy / scale
-            return gx * dx + gy * dy
-
-        n00 = dot_grad(x0, y0)
-        n10 = dot_grad(x1, y0)
-        n01 = dot_grad(x0, y1)
-        n11 = dot_grad(x1, y1)
-
+        n00, n10 = dot(x0, y0), dot(x1, y0)
+        n01, n11 = dot(x0, y1), dot(x1, y1)
         ix0 = n00 + u * (n10 - n00)
         ix1 = n01 + u * (n11 - n01)
-
         return ix0 + v * (ix1 - ix0)
 
-    def _smooth_terrain(self, terrain: np.ndarray, terrain_names: list, iterations: int = 2) -> np.ndarray:
-        h, w = terrain.shape
+    def _thin_ridges(self, mask: np.ndarray) -> np.ndarray:
+        neighbours = nd_convolve(mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest")
+        return mask & (neighbours >= 2)
+
+    def _drop_small_components(self, mask: np.ndarray, min_size: int) -> np.ndarray:
+        labelled, count = label(mask, structure=np.ones((3, 3)))
+        if count == 0:
+            return mask
+        sizes = np.bincount(labelled.ravel())
+        keep = np.zeros(sizes.shape, dtype=bool)
+        keep[1:] = sizes[1:] >= min_size
+        return keep[labelled]
+
+    def _create_forest_patches(
+        self, forest_noise: np.ndarray, base_noise: np.ndarray, mountain_mask: np.ndarray
+    ) -> np.ndarray:
+        mountain_distance = distance_transform_edt(~mountain_mask)
+        mountain_proximity = 1.0 - np.clip(mountain_distance / 8.0, 0.0, 1.0)
+
+        score = forest_noise * 0.5 + (1.0 - base_noise) * 0.3 + mountain_proximity * 0.2
+        score = _normalize(score)
+        forest_mask = (score > 0.55) & ~mountain_mask
+
+        for _ in range(3):
+            neighbours = nd_convolve(
+                forest_mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest"
+            )
+            grow = (neighbours >= 4) | ((neighbours >= 3) & (mountain_distance < 6))
+            forest_mask = forest_mask | (grow & ~mountain_mask)
+        return forest_mask
+
+    def _smooth_terrain(self, terrain: np.ndarray, names: list[str], iterations: int) -> np.ndarray:
         for _ in range(iterations):
-            new_terrain = terrain.copy()
-            for y in range(h):
-                for x in range(w):
-                    neighbors = []
-                    for dy in [-1, 0, 1]:
-                        for dx in [-1, 0, 1]:
-                            if dy == 0 and dx == 0:
-                                continue
-                            ny = (y + dy) % h
-                            nx = (x + dx) % w
-                            if terrain[ny, nx] is not None:
-                                neighbors.append(terrain[ny, nx])
-                    if neighbors:
-                        unique, counts = np.unique(neighbors, return_counts=True)
-                        new_terrain[y, x] = unique[np.argmax(counts)]
-            terrain = new_terrain
+            counts = np.stack(
+                [
+                    nd_convolve(
+                        (terrain == idx).astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest"
+                    )
+                    for idx in range(len(names))
+                ]
+            )
+            terrain = counts.argmax(axis=0).astype(np.int8)
         return terrain
+
+    def _carve_mountain_passes(self, mountain_mask: np.ndarray) -> None:
+        labelled, count = label(mountain_mask, structure=np.ones((3, 3)))
+        for component in range(1, count + 1):
+            region = labelled == component
+            if region.sum() <= 200:
+                continue
+            dist = distance_transform_edt(region)
+            y, x = np.unravel_index(int(np.argmin(dist)), dist.shape)
+            if dist[y, x] < 8:
+                self._carve_pass_at(int(y), int(x), width=2)
+
+    def _carve_pass_at(self, cy: int, cx: int, width: int) -> None:
+        h, w = self.height, self.width
+        outer_width = width + 2
+        reach = np.arange(-outer_width, outer_width + 1)
+        grid_y, grid_x = np.meshgrid(reach, reach, indexing="ij")
+        squared = grid_y**2 + grid_x**2
+        inner = squared <= width**2
+        outer = (squared <= outer_width**2) & ~inner
+
+        plains = self._terrain_index["plains"]
+        rock = self._terrain_index["rock"]
+
+        ys, xs = cy + grid_y, cx + grid_x
+        keep = (ys >= 0) & (ys < h) & (xs >= 0) & (xs < w)
+        self.terrain[ys[keep], xs[keep]] = plains
+
+        ys, xs = cy + grid_y, cx + grid_x
+        keep = (ys >= 0) & (ys < h) & (xs >= 0) & (xs < w) & outer
+        replace = keep & (self.terrain[ys.clip(0, h - 1), xs.clip(0, w - 1)] == rock)
+        self.terrain[ys[replace], xs[replace]] = plains
+
+    def _apply_ocean_border(self) -> None:
+        border = self.ocean_border
+        if border <= 0:
+            return
+        ocean = self._terrain_index["ocean"]
+        self.terrain[:border, :] = ocean
+        self.terrain[-border:, :] = ocean
+        self.terrain[:, :border] = ocean
+        self.terrain[:, -border:] = ocean
+
+    def refresh_terrain_properties(self) -> None:
+        """Re-derive per-cell capacity/regen/passability from the current terrain and config."""
+        self.resource_capacity.fill(0.0)
+        self.regen_rate.fill(0.0)
+        self.passable.fill(False)
+        self.mobility_prey.fill(0.0)
+        self.mobility_predator.fill(0.0)
+        for name, terrain_cfg in self.config.terrain_types.items():
+            mask = self.terrain == self._terrain_index[name]
+            if not mask.any():
+                continue
+            self.resource_capacity[mask] = terrain_cfg.resource_capacity
+            self.regen_rate[mask] = terrain_cfg.resource_regen_rate
+            self.passable[mask] = terrain_cfg.passable
+            self.mobility_prey[mask] = terrain_cfg.mobility_prey
+            self.mobility_predator[mask] = terrain_cfg.mobility_predator
+        np.clip(self.resources, 0.0, self.resource_capacity, out=self.resources)
+
+    def set_terrain(self, y: int, x: int, name: str) -> None:
+        """Creator-mode painting: update terrain and its derived properties in place."""
+        if not self.in_bounds(y, x) or name not in self._terrain_index:
+            return
+        self.terrain[y, x] = self._terrain_index[name]
+        terrain_cfg = self.config.terrain_types[name]
+        self.resource_capacity[y, x] = terrain_cfg.resource_capacity
+        self.regen_rate[y, x] = terrain_cfg.resource_regen_rate
+        self.passable[y, x] = terrain_cfg.passable
+        self.resources[y, x] = min(self.resources[y, x], terrain_cfg.resource_capacity)
+
+    # ---------------------------------------------------------------- resources
 
     def _initialize_resources(self) -> None:
         self.resources = self.rng.uniform(0.3, 0.7) * self.resource_capacity
+        self._snapshot_resources()
+
+    def _snapshot_resources(self) -> None:
+        self._post_regen = self.resources.copy()
 
     def step(self) -> None:
+        self._update_depletion_signal()
         self._regenerate()
         self._diffuse()
+        self._snapshot_resources()
 
     def _regenerate(self) -> None:
-        neighbor_depletion = self._compute_neighbor_depletion()
         deficit = self.resource_capacity - self.resources
-        base_regen = self.regen_rate * deficit * 0.025
-        suppression = np.clip(1.0 - neighbor_depletion * 2.2, 0.0, 1.0)
-        regen = base_regen * suppression
-        self.resources += regen
-        np.clip(self.resources, 0, self.resource_capacity, out=self.resources)
+        base_regen = self.regen_rate * deficit * self.config.regen_base_factor
+        # Suppression is floored rather than allowed to reach zero: a stripped
+        # neighbourhood slows regrowth to a trickle instead of halting it, so the
+        # world can always recover instead of locking into a permanent dead state.
+        suppression = np.clip(
+            1.0 - self._neighbour_depletion() * self.config.depletion_suppression,
+            self.config.min_regen_suppression,
+            1.0,
+        )
+        self.resources += base_regen * suppression
+        np.clip(self.resources, 0.0, self.resource_capacity, out=self.resources)
 
-    def _compute_neighbor_depletion(self) -> np.ndarray:
-        ratio = np.zeros_like(self.resources)
+    def _neighbour_depletion(self) -> np.ndarray:
         cap_mask = self.resource_capacity > 0
-        ratio[cap_mask] = self.resources[cap_mask] / self.resource_capacity[cap_mask]
+        ratio = np.zeros_like(self.resources)
+        np.divide(self.resources, self.resource_capacity, out=ratio, where=cap_mask)
 
-        kernel = np.ones((3, 3), dtype=np.float32)
-        kernel[1, 1] = 0
-        from scipy.signal import convolve2d
-        neighbor_sum = convolve2d(ratio, kernel, mode="same", boundary="wrap")
-        neighbor_count = convolve2d(cap_mask.astype(np.float32), kernel, mode="same", boundary="wrap")
-        neighbor_avg = np.where(neighbor_count > 0, neighbor_sum / (neighbor_count + 1e-8), 1.0)
-
-        depletion = np.clip(1.0 - neighbor_avg / 0.6, 0, 1)
-        return depletion
+        neighbour_sum = nd_convolve(ratio, _NEIGHBOUR_KERNEL, mode="wrap")
+        neighbour_count = nd_convolve(
+            cap_mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="wrap"
+        )
+        neighbour_avg = np.where(
+            neighbour_count > 0, neighbour_sum / np.maximum(neighbour_count, 1e-8), 1.0
+        )
+        return np.clip(1.0 - neighbour_avg / self.config.depletion_threshold, 0.0, 1.0)
 
     def _diffuse(self) -> None:
-        if self.config.resource_diffusion_rate <= 0:
+        rate = self.config.resource_diffusion_rate
+        if rate <= 0:
             return
-        kernel = np.array([[0, 1, 0], [1, -4, 1], [0, 1, 0]]) * self.config.resource_diffusion_rate
-        from scipy.signal import convolve2d
-        diff = convolve2d(self.resources, kernel, mode="same", boundary="wrap")
-        self.resources += diff
-        np.clip(self.resources, 0, self.resource_capacity, out=self.resources)
+        laplacian = nd_convolve(self.resources, _LAPLACIAN_KERNEL * rate, mode="wrap")
+        self.resources += laplacian
+        np.clip(self.resources, 0.0, self.resource_capacity, out=self.resources)
+
+    def _update_depletion_signal(self) -> None:
+        """Fractional loss accumulated since the previous regeneration pass.
+
+        Regrowth is excluded (clipped at 0). Smoothing gives the signal a short
+        memory so a cell that is merely *already* stripped does not keep
+        attracting predators -- only fresh grazing does.
+        """
+        denominator = np.where(self.resource_capacity > 0, self.resource_capacity, 1.0)
+        loss = np.clip((self._post_regen - self.resources) / denominator, 0.0, 1.0)
+        smoothing = float(self.config.depletion_signal_smoothing)
+        self.depletion_rate *= smoothing
+        self.depletion_rate += (1.0 - smoothing) * loss
 
     def consume_resource(self, y: int, x: int, amount: float) -> float:
-        available = self.resources[y, x]
-        taken = min(amount, available)
+        if not self.in_bounds(y, x):
+            return 0.0
+        taken = min(amount, float(self.resources[y, x]))
+        if taken <= 0:
+            return 0.0
         self.resources[y, x] -= taken
         return taken
 
+    # ----------------------------------------------------------------- queries
+
+    def in_bounds(self, y: int, x: int) -> bool:
+        return 0 <= y < self.height and 0 <= x < self.width
+
+    def clamp(self, y: int, x: int) -> tuple[int, int]:
+        return (
+            int(min(max(y, 0), self.height - 1)),
+            int(min(max(x, 0), self.width - 1)),
+        )
+
     def get_resource_at(self, y: int, x: int) -> float:
-        y = max(0, min(y, self.height - 1))
-        x = max(0, min(x, self.width - 1))
-        return self.resources[y, x]
-
-    def get_terrain_at(self, y: int, x: int) -> str:
-        y = max(0, min(y, self.height - 1))
-        x = max(0, min(x, self.width - 1))
-        return self.terrain[y, x]
-
-    def is_passable(self, y: int, x: int) -> bool:
-        y = max(0, min(y, self.height - 1))
-        x = max(0, min(x, self.width - 1))
-        return self.passable[y, x]
-
-    def get_terrain_color(self, y: int, x: int) -> tuple[int, int, int]:
-        y = max(0, min(y, self.height - 1))
-        x = max(0, min(x, self.width - 1))
-        t = self.terrain[y, x]
-        return self.config.terrain_types[t].color
+        y, x = self.clamp(y, x)
+        return float(self.resources[y, x])
 
     def get_resource_ratio(self, y: int, x: int) -> float:
-        y = max(0, min(y, self.height - 1))
-        x = max(0, min(x, self.width - 1))
-        cap = self.resource_capacity[y, x]
-        return self.resources[y, x] / cap if cap > 0 else 0.0
+        y, x = self.clamp(y, x)
+        capacity = self.resource_capacity[y, x]
+        return float(self.resources[y, x] / capacity) if capacity > 0 else 0.0
 
-    def get_mobility_prey(self, terrain: str) -> float:
-        return self.config.terrain_types[terrain].mobility_prey
+    def get_terrain_at(self, y: int, x: int) -> str:
+        y, x = self.clamp(y, x)
+        return self.terrain_names[int(self.terrain[y, x])]
 
-    def get_mobility_predator(self, terrain: str) -> float:
-        return self.config.terrain_types[terrain].mobility_predator
+    def get_terrain_color(self, y: int, x: int) -> tuple[int, int, int]:
+        return self.config.terrain_types[self.get_terrain_at(y, x)].color
 
-    def get_visibility_prey(self, terrain: str) -> float:
-        return self.config.terrain_types[terrain].visibility_prey
+    def is_passable(self, y: int, x: int) -> bool:
+        y, x = self.clamp(y, x)
+        return bool(self.passable[y, x])
 
-    def get_visibility_predator(self, terrain: str) -> float:
-        return self.config.terrain_types[terrain].visibility_predator
+    def mobility(self, y: int, x: int, predator: bool) -> float:
+        terrain = self.config.terrain_types[self.get_terrain_at(y, x)]
+        return terrain.mobility_predator if predator else terrain.mobility_prey
 
-    def get_effective_vision_prey(self, y: int, x: int, base_radius: int) -> int:
-        terrain = self.get_terrain_at(y, x)
-        visibility = self.get_visibility_prey(terrain)
-        return max(1, int(base_radius * visibility))
+    def visibility(self, y: int, x: int, predator: bool) -> float:
+        terrain = self.config.terrain_types[self.get_terrain_at(y, x)]
+        return terrain.visibility_predator if predator else terrain.visibility_prey
 
-    def get_effective_vision_predator(self, y: int, x: int, base_radius: int) -> int:
-        terrain = self.get_terrain_at(y, x)
-        visibility = self.get_visibility_predator(terrain)
-        return max(1, int(base_radius * visibility))
+    def effective_vision(self, y: int, x: int, base_radius: int, predator: bool) -> int:
+        return max(1, int(base_radius * self.visibility(y, x, predator)))
 
-    def can_see_through(self, from_y: int, from_x: int, to_y: int, to_x: int, is_predator: bool) -> bool:
-        from_terrain = self.get_terrain_at(from_y, from_x)
-        to_terrain = self.get_terrain_at(to_y, to_x)
-        
-        if from_terrain == 'rock':
-            return True
-        
-        if is_predator:
-            return self.get_visibility_predator(from_terrain) > 0.5
-        else:
-            return self.get_visibility_prey(from_terrain) > 0.5
+    def total_resource(self) -> float:
+        return float(self.resources.sum())
+
+    def as_lists(self) -> tuple[list, list]:
+        return (
+            [[self.terrain_names[int(i)] for i in row] for row in self.terrain],
+            self.resources.tolist(),
+        )
+
+
+def _normalize(array: np.ndarray) -> np.ndarray:
+    lo = array.min()
+    hi = array.max()
+    if hi - lo < 1e-12:
+        return np.zeros_like(array)
+    return (array - lo) / (hi - lo)

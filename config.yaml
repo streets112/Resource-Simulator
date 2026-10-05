@@ -1,13 +1,14 @@
 # Resource Simulator Configuration
 
 simulation:
-  width: 50
-  height: 50
+  width: 200
+  height: 200
   timestep_ms: 100
   max_steps: 0
+  simulation_speed: 1.0
 
 environment:
-  ocean_border_width: 1
+  ocean_border_width: 5
   terrain_types:
     ocean:
       color: [30, 60, 180]
@@ -50,48 +51,86 @@ environment:
     plains: 0.30
     forest: 0.55
   resource_diffusion_rate: 0.1
+  regen_base_factor: 0.025
+  depletion_threshold: 0.6
+  depletion_suppression: 2.2
+  min_regen_suppression: 0.25
+  depletion_signal_smoothing: 0.7
 
 grazer:
   initial_count: 200
   max_energy: 1000
-  energy_per_step: 10
+  energy_per_step: 5
   energy_from_resource: 18
   reproduction_min_age: 55
   reproduction_min_energy: 650
-  reproduction_energy_cost: 0.25
+  reproduction_energy_cost: 0.45
   offspring_initial_energy: 200
   move_speed: 1
   gradient_weight: 0.7
   gradient_weight_std: 0.2
   vision_radius: 5
-  max_fat: 500.0
+  herd_radius: 8
+  separation_radius: 2
+  herd_follow_chance: 0.7
+  cohesion_weight: 0.4
+  alignment_weight: 0.3
+  separation_weight: 0.3
+  flee_radius: 5
+  flee_weight: 3.0
+  min_efficiency: 0.3
 
 rabbit:
   initial_count: 100
   max_energy: 400
-  energy_per_step: 8
+  energy_per_step: 3
   energy_from_resource: 12
-  reproduction_min_age: 20
-  reproduction_min_energy: 150
-  reproduction_energy_cost: 0.2
-  offspring_initial_energy: 100
+  reproduction_min_age: 35
+  reproduction_min_energy: 240
+  reproduction_energy_cost: 0.25
+  offspring_initial_energy: 140
   move_speed: 1
   gradient_weight: 0.9
   gradient_weight_std: 0.1
   vision_radius: 4
+  herd_radius: 6
+  separation_radius: 2
+  herd_follow_chance: 0.7
+  cohesion_weight: 0.4
+  alignment_weight: 0.3
+  separation_weight: 0.3
+  flee_radius: 5
+  flee_weight: 3.0
+  min_efficiency: 0.3
 
 predator:
   initial_count: 30
   max_energy: 800
-  energy_per_step: 3
-  energy_from_prey: 700
-  reproduction_min_age: 65
-  reproduction_min_energy: 250
-  reproduction_energy_cost: 0.3
-  offspring_initial_energy: 200
+  energy_per_step: 6
+  energy_from_prey: 260
+  reproduction_min_age: 110
+  reproduction_min_energy: 420
+  reproduction_energy_cost: 0.4
+  offspring_initial_energy: 140
   move_speed: 2
   chase_radius: 7
   resource_sense_radius: 10
+  pack_radius: 10
+  pack_hunt_chance: 0.6
+  flank_chance: 0.4
+  pack_wander_chance: 0.5
+  pack_score_bonus: 3.0
+  depleted_ratio_threshold: 0.3
+  investigate_steps: 12
+  investigate_threshold: 0.02
+  vision_boost_on_investigate: 1.5
+
+carcass:
+  decay_rate: 0.98
+  min_energy: 1.0
+  carcass_energy_fraction: 1.0
+  consumption_divisor: 8.0
+  feed_radius: 1
 
 visualization:
   cell_size: 8

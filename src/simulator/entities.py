@@ -1,7 +1,13 @@
-import numpy as np
 from dataclasses import dataclass, field
-from typing import Optional
-from simulator.config import GrazerConfig, PredatorConfig, RabbitConfig
+from itertools import count
+from typing import Optional, Protocol
+
+_IDS = count(1)
+
+
+class HasResourceField(Protocol):
+    def get_resource_ratio(self, y: int, x: int) -> float: ...
+    def consume_resource(self, y: int, x: int, amount: float) -> float: ...
 
 
 @dataclass
@@ -9,137 +15,113 @@ class Entity:
     x: float
     y: float
     energy: float
-    max_energy: float
+    config: object
     age: int = 0
-    id: int = field(default_factory=lambda: Entity._next_id())
     alive: bool = True
-    size: float = 1.0
+    id: int = field(default_factory=lambda: next(_IDS))
+    last_dy: int = 0
+    last_dx: int = 0
 
-    _id_counter: int = field(default=0, init=False, repr=False)
+    @property
+    def max_energy(self) -> float:
+        return float(self.config.max_energy)
 
-    @classmethod
-    def _next_id(cls) -> int:
-        cls._id_counter += 1
-        return cls._id_counter
+    @property
+    def energy_ratio(self) -> float:
+        ceiling = self.max_energy
+        return self.energy / ceiling if ceiling > 0 else 0.0
 
-    def step_energy(self, cost: float) -> None:
-        self.energy -= cost
+    @property
+    def move_speed(self) -> int:
+        return int(self.config.move_speed)
+
+    def step_energy(self) -> None:
+        self.energy -= float(self.config.energy_per_step)
         self.age += 1
         if self.energy <= 0:
+            self.energy = 0.0
             self.alive = False
 
     def add_energy(self, amount: float) -> float:
-        old = self.energy
+        """Credit energy, respecting the species cap. Returns the amount actually taken."""
+        before = self.energy
         self.energy = min(self.max_energy, self.energy + amount)
-        return self.energy - old
+        return self.energy - before
+
+    def record_move(self, dy: int, dx: int) -> None:
+        self.last_dy = dy
+        self.last_dx = dx
 
 
 @dataclass
-class Grazer(Entity):
-    """Deer - can eat while moving at 60% efficiency, gains 110% when stopped, stores fat"""
+class Prey(Entity):
+    """Shared prey mechanics. Grazers and rabbits differ only by config values."""
+
     gradient_weight: float = 0.7
+    inherited_gradient_weight: float = 0.7
     vision_radius: int = 5
-    move_speed: int = 1
-    fat: float = 0.0  # Stored fat reserves
-    max_fat: float = 500.0  # Maximum fat storage
-    eating_state: str = "moving"  # "moving", "grazing"
-    grazing_timer: int = 0
-    config: Optional['GrazerConfig'] = None
 
-    def __post_init__(self):
-        if self.config:
-            self.max_energy = self.config.max_energy
-            self.gradient_weight = self.config.gradient_weight
-            self.vision_radius = self.config.vision_radius
-            self.move_speed = self.config.move_speed
-            self.max_fat = self.config.max_fat
+    @property
+    def vision(self) -> int:
+        return int(self.config.vision_radius)
 
-    def eat_while_moving(self, amount: float) -> float:
-        """Eat while moving - 60% efficiency"""
-        efficiency = 0.6
-        eaten = min(amount * 0.6, self.max_energy - self.energy)
-        self.energy += eaten
-        return eaten
+    def mutate_gradient_weight(self, rng) -> None:
+        std = float(self.config.gradient_weight_std)
+        self.gradient_weight = rng.normal(self.inherited_gradient_weight, std)
+        self.gradient_weight = float(min(1.0, max(0.0, self.gradient_weight)))
 
-    def eat_while_stopped(self, amount: float) -> float:
-        """Eat while stopped - 110% efficiency, stores excess as fat"""
-        efficiency = 1.1
-        gained = amount * 1.1
-        # First fill energy to max
-        energy_needed = self.max_energy - self.energy
-        if gained <= energy_needed:
-            self.energy += gained
-        else:
-            self.energy = self.max_energy
-            # Excess goes to fat
-            excess = gained - energy_needed
-            self.fat = min(self.max_fat, self.fat + excess)
-        return min(gained, self.max_energy - self.energy + self.max_fat - self.fat)
+    def eat(self, env: HasResourceField) -> float:
+        """SPECIFICATION.md resource consumption.
 
-    def use_fat(self, amount: float) -> float:
-        """Use stored fat for energy when needed"""
-        used = min(amount, self.fat)
-        self.fat -= used
-        self.energy = min(self.max_energy, self.energy + used)
-        return used
+        efficiency = max(min_efficiency, resource_ratio)
+        eaten      = consume_resource(y, x, energy_from_resource * efficiency)
+        energy    <- min(max_energy, energy + eaten)
+        """
+        y, x = int(self.y), int(self.x)
+        ratio = env.get_resource_ratio(y, x)
+        if ratio <= 0:
+            return 0.0
+        efficiency = max(float(self.config.min_efficiency), ratio)
+        taken = env.consume_resource(y, x, float(self.config.energy_from_resource) * efficiency)
+        return self.add_energy(taken)
 
 
 @dataclass
-class Rabbit(Entity):
-    """Rabbit - fast breeding, low energy, high herding, stops to eat"""
-    gradient_weight: float = 0.9  # Very high herding
-    vision_radius: int = 4  # Slightly smaller vision
-    move_speed: int = 1
-    eating_state: str = "moving"  # "moving", "eating", "grazing"
-    grazing_timer: int = 0  # Timer for grazing duration
-    config: Optional['RabbitConfig'] = None
+class Grazer(Prey):
+    pass
 
-    def __post_init__(self):
-        if self.config:
-            self.max_energy = self.config.max_energy
-            self.gradient_weight = self.config.gradient_weight
-            self.vision_radius = self.config.vision_radius
-            self.move_speed = self.config.move_speed
 
-    def eat_while_moving(self, amount: float) -> float:
-        """Eat while moving - only 20% efficiency"""
-        efficiency = 0.2
-        eaten = min(amount * 0.2, self.max_energy - self.energy)
-        self.energy += eaten
-        return eaten
-
-    def eat_while_stopped(self, amount: float) -> float:
-        """Eat while stopped - gains lots of energy"""
-        efficiency = 3.0  # Gains 3x when stopped
-        gained = amount * 3.0
-        gained = min(gained, self.max_energy - self.energy)
-        self.energy += gained
-        return gained
+@dataclass
+class Rabbit(Prey):
+    pass
 
 
 @dataclass
 class Predator(Entity):
-    chase_radius: int = 5
-    resource_sense_radius: int = 8
-    move_speed: int = 2
-    eating_state: str = "moving"  # "moving", "eating_carcass", "eating_prey"
-    eating_timer: int = 0
-    config: Optional['PredatorConfig'] = None
+    chase_radius: int = 7
+    resource_sense_radius: int = 10
+    eating_state: str = "moving"
+    investigate_y: Optional[int] = None
+    investigate_x: Optional[int] = None
+    investigate_timer: int = 0
 
-    def __post_init__(self):
-        if self.config:
-            self.max_energy = self.config.max_energy
-            self.chase_radius = self.config.chase_radius
-            self.resource_sense_radius = self.config.resource_sense_radius
-            self.move_speed = self.config.move_speed
+    @property
+    def vision(self) -> int:
+        return int(self.config.chase_radius)
 
-    def can_eat_carcass(self) -> bool:
-        """Can eat carcass in adjacent cell without moving"""
-        return True
+    @property
+    def investigating(self) -> bool:
+        return self.investigate_timer > 0
 
-    def can_eat_prey(self) -> bool:
-        """Can only eat prey when in same cell and stopped"""
-        return True
+    def begin_investigation(self, y: int, x: int, steps: int) -> None:
+        self.investigate_y = int(y)
+        self.investigate_x = int(x)
+        self.investigate_timer = int(steps)
+
+    def clear_investigation(self) -> None:
+        self.investigate_y = None
+        self.investigate_x = None
+        self.investigate_timer = 0
 
 
 @dataclass
@@ -148,24 +130,19 @@ class Carcass:
     y: float
     energy: float
     max_energy: float
+    config: object
     age: int = 0
-    id: int = field(default_factory=lambda: Carcass._next_id())
+    id: int = field(default_factory=lambda: next(_IDS))
     consumed_by: list = field(default_factory=list)
-
-    _id_counter: int = field(default=0, init=False, repr=False)
-
-    @classmethod
-    def _next_id(cls) -> int:
-        cls._id_counter += 1
-        return cls._id_counter
 
     def step(self) -> None:
         self.age += 1
-        self.energy *= 0.98
-        if self.energy < 1:
-            self.energy = 0
+        self.energy *= float(self.config.decay_rate)
+        if self.energy < float(self.config.min_energy):
+            self.energy = 0.0
 
-    def can_provide_energy(self) -> bool:
+    @property
+    def provides_energy(self) -> bool:
         return self.energy > 0
 
     def take_energy(self, amount: float) -> float:
