@@ -33,6 +33,18 @@ environment:
     plains:
       color: [180, 200, 100]
       resource_regen_rate: 1.5
+      # Capacity is the ceiling on energy extractable per cell visit, because
+      # consume_resource can only take what is there. Raising grazing_efficiency
+      # cannot compensate: income per visit is min(intake, capacity), so once
+      # capacity binds, efficiency stops mattering.
+      #
+      # Measured grazer stability over 500 steps (3 seeds):
+      #   70/14 -> grazers 129-264, rabbits 16-105   sustained
+      #   50/10 -> grazers 22-22,    rabbits 5-6      collapse
+      #   35/8  -> grazers 30-40,    rabbits 1-21     collapse
+      # Below 70/14 the prey cannot earn enough per visit to cover metabolism
+      # plus movement, so the only remaining levers are metabolic cost,
+      # reproduction thresholds, or regen rate.
       resource_capacity: 14
       passable: true
       mobility_prey: 1.0
@@ -43,6 +55,12 @@ environment:
     forest:
       color: [60, 140, 60]
       resource_regen_rate: 0.5
+      # Was 70, which forests never depleted from. Lower values measured:
+      # 35 collapses prey (grazers 259 -> 36, rabbits -> 14, monotone decline)
+      # because income per cell visit is capped by capacity. Regen blocking makes
+      # no difference at that capacity -- herds are tight enough (herd_radius 8,
+      # separation_radius 2) that threshold 1 and threshold 3 block the same
+      # cells. Capacity, not regen, is the binding constraint.
       resource_capacity: 70
       passable: true
       mobility_prey: 0.6
@@ -59,6 +77,8 @@ environment:
   depletion_threshold: 0.6
   depletion_suppression: 2.2
   min_regen_suppression: 0.25
+  regen_blocked_by_grazing: true
+  regen_block_threshold: 3
   depletion_signal_smoothing: 0.7
 
 grazer:

@@ -42,6 +42,11 @@ class Environment:
         # Fresh grazing lights this up; a steadily depleted cell settles to ~0.
         self.depletion_rate = np.zeros((height, width), dtype=np.float64)
 
+        # Number of prey feeding in each cell this step. Regeneration is suppressed
+        # where a cell is being actively worked, so a herd camping on ground can
+        # strip it; a lone animal passing through does not freeze the ground.
+        self.occupied = np.zeros((height, width), dtype=np.int32)
+
         self._generate_terrain_biomes()
         self._snapshot_resources()
         self._initialize_resources()
@@ -337,7 +342,9 @@ class Environment:
     def _snapshot_resources(self) -> None:
         self._post_regen = self.resources.copy()
 
-    def step(self) -> None:
+    def step(self, occupied: np.ndarray | None = None) -> None:
+        if occupied is not None and occupied.shape == self.occupied.shape:
+            self.occupied = occupied
         self._update_depletion_signal()
         self._regenerate()
         self._diffuse()
@@ -354,6 +361,12 @@ class Environment:
             self.config.min_regen_suppression,
             1.0,
         )
+        if self.config.regen_blocked_by_grazing:
+            # Ground being worked does not regrow, but only once enough prey are
+            # on it to count as camping. A lone grazer passing through still
+            # lets the cell recover; a herd settling in strips it for good.
+            worked = self.occupied >= max(1, int(self.config.regen_block_threshold))
+            suppression = np.where(worked, 0.0, suppression)
         self.resources += base_regen * suppression
         np.clip(self.resources, 0.0, self.resource_capacity, out=self.resources)
 

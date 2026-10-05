@@ -132,6 +132,10 @@ class Simulation:
         self.ended = False
         self.extinct_step: int | None = None
 
+        # Counts of prey feeding on each cell during the previous step; passed to
+        # the environment so heavily worked ground cannot regenerate.
+        self._grazed = np.zeros((self.map_height, self.map_width), dtype=np.int32)
+
         self._refresh_fields()
         self._spawn_initial_entities()
 
@@ -334,7 +338,7 @@ class Simulation:
     # ------------------------------------------------------------------ loop
 
     def step(self) -> None:
-        self.env.step()
+        self.env.step(occupied=self._grazed)
         self._refresh_fields()
         self._build_indices()
 
@@ -347,6 +351,9 @@ class Simulation:
 
         self._reproduce()
         self._cleanup()
+
+        # Consumed by the next step's regeneration pass.
+        self._grazed.fill(0)
 
         stats = self._record_stats()
         self.stats_history.append(stats)
@@ -422,7 +429,9 @@ class Simulation:
                 prey.foraging_state = state
                 if state == "grazing":
                     # Standing still: feed hard, do not move.
-                    prey.eat(self.env, cfg.grazing_efficiency)
+                    gained = prey.eat(self.env, cfg.grazing_efficiency)
+                    if gained > 0:
+                        self._mark_grazed(prey)
                     continue
                 # Travelling: feed on the move, at a rate that cannot cover
                 # metabolism, so the journey costs energy.
@@ -437,7 +446,18 @@ class Simulation:
             target = self._forage_target(prey, cfg)
             if self._move_prey(prey, cfg, herd, target):
                 self._record_death(kind)
-            prey.eat(self.env)
+            if prey.eat(self.env) > 0:
+                self._mark_grazed(prey)
+
+    def _mark_grazed(self, prey) -> None:
+        """Record that this cell is being fed on, so a camped herd strips it.
+
+        The count is handed to the environment on the next step, by which point
+        the prey has not yet moved, so it describes where they actually are.
+        """
+        y, x = int(prey.y), int(prey.x)
+        if 0 <= y < self.map_height and 0 <= x < self.map_width:
+            self._grazed[y, x] += 1
 
     def _herd_vectors(self, prey, index: _SpatialIndex, cfg) -> tuple | None:
         """Cohesion, alignment and separation from neighbours inside herd_radius.

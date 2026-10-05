@@ -40,6 +40,8 @@ class EnvironmentConfig:
     depletion_threshold: float = 0.6
     depletion_suppression: float = 2.2
     min_regen_suppression: float = 0.25
+    regen_blocked_by_grazing: bool = True
+    regen_block_threshold: int = 3
     depletion_signal_smoothing: float = 0.7
 
 
