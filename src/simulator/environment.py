@@ -430,8 +430,8 @@ class Environment:
             
             # Use upwind scheme for advection (more stable)
             advected = np.zeros_like(self.scent)
-            shift_y = int(round(wind_dy * 4))
-            shift_x = int(round(wind_dx * 4))
+            shift_y = int(round(wind_dy * 3))
+            shift_x = int(round(wind_dx * 3))
             
             if shift_y >= 0:
                 advected[shift_y:, :] = self.scent[:-shift_y if shift_y else None, :]
