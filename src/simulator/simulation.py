@@ -211,8 +211,10 @@ class Simulation:
             dy = ty - py
             dx = tx - px
             dist = max(1, self.distance(py, px, ty, tx))
-            # Scent is stronger closer and further downwind
-            strength = (1.0 / dist) * (1.0 + wind_x * dx + wind_y * dy)
+            # Scent is stronger closer and further UPWIND (scent flows downwind FROM prey)
+            # wind_x * dx + wind_y * dy is positive when prey is downwind of predator
+            # We want higher strength when prey is UPWIND (negative dot product)
+            strength = (1.0 / dist) * (1.0 - wind_x * dx - wind_y * dy)
             grad_y += (ty - py) * strength / dist
             grad_x += (tx - px) * strength / dist
             found = True
