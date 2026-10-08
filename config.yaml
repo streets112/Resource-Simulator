@@ -2,7 +2,7 @@
 
 simulation:
   width: 200
-  height: 200
+  height: 150
   timestep_ms: 100
   max_steps: 0
   simulation_speed: 1.0

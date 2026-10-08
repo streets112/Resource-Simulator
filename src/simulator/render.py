@@ -202,6 +202,7 @@ class MainRenderer:
         self.show_grazers = True
         self.show_predators = True
         self.show_carcasses = True
+        self.show_scent = False
         self.show_grid = self.vis.show_grid
 
         self.creator_mode = False
@@ -483,6 +484,9 @@ class MainRenderer:
                 self.brush_size = max(1, self.brush_size - 1)
         elif key == pygame.K_F5:
             self.chart.visible = not self.chart.visible
+        elif key == pygame.K_s:
+            self.show_scent = not self.show_scent
+            self.dirty_world = True
         elif key == pygame.K_m:
             self.creator_mode = not self.creator_mode
         elif self.creator_mode and key in (pygame.K_1, pygame.K_2, pygame.K_3):
@@ -647,7 +651,8 @@ class MainRenderer:
         """
         if self._base_pixels is not None and self._base_size == (pixel_width, pixel_height):
             return
-        self._base_pixels = np.zeros((pixel_width, pixel_height, 3), dtype=np.uint8)
+        # Fix: numpy arrays are (height, width, channels), so use (pixel_height, pixel_width)
+        self._base_pixels = np.zeros((pixel_height, pixel_width, 3), dtype=np.uint8)
         self._base_size = (pixel_width, pixel_height)
         self._base_surface = self._surface_from_pixels(self._base_pixels)
         self._invalidate_scale_cache()
@@ -657,9 +662,9 @@ class MainRenderer:
         cell = self._base_cell
         if pixels is None or cell <= 0:
             return None
-        if pixels.shape[0] != map_width * cell or pixels.shape[1] != map_height * cell:
+        if pixels.shape[0] != map_height * cell or pixels.shape[1] != map_width * cell:
             return None
-        return pixels.reshape(map_width, cell, map_height, cell, 3)
+        return pixels.reshape(map_height, cell, map_width, cell, 3)
 
     def _paint_world(self, colors: np.ndarray, shade, full: bool) -> None:
         """Write terrain (and the resource channel) into the cached layer.
@@ -680,20 +685,27 @@ class MainRenderer:
         half = max(1, self._base_cell // 2)
         # Surfaces are x-major, so transpose the small (H, W, 3) cell arrays
         # rather than the multi-megabyte pixel buffer.
+        # view shape is (map_height, cell, map_width, cell, 3)
 
         if not self.quadrant_mode:
             # Overview: terrain hue scaled by resource level, whole cell.
-            base = (shade if shade is not None else colors).transpose(1, 0, 2)
+            base = (shade if shade is not None else colors)  # (H, W, 3)
+            # view is (H, cell, W, cell, 3), need to broadcast base (H, W, 3) to it
+            # base[:, None, :, None, :] -> (H, 1, W, 1, 3) broadcasts to (H, cell, W, cell, 3)
             view[:, :, :, :half, :] = base[:, None, :, None, :]
             view[:, :, :, half:, :] = base[:, None, :, None, :]
             return
 
         if full:
-            colors_xy = colors.transpose(1, 0, 2)[:, None, :, None, :]
+            # Quadrant mode: fill all four quadrants with terrain color
+            # base = colors (H, W, 3) -> need (H, 1, W, 1, 3) -> broadcast to (H, cell, W, cell, 3)
+            colors_xy = colors[:, None, :, None, :]
             view[:, :, :, :half, :] = colors_xy
             view[:, :, :, half:, :] = colors_xy
         if shade is not None:
-            view[:, half:, :, :half, :] = shade.transpose(1, 0, 2)[:, None, :, None, :]
+            # shade is (H, W, 3) -> (H, 1, W, 1, 3)
+            shade_xy = shade[:, None, :, None, :]
+            view[:, half:, :, :half, :] = shade_xy
 
     def _surface_from_pixels(self, pixels: np.ndarray):
         height, width = pixels.shape[0], pixels.shape[1]
@@ -789,6 +801,7 @@ class MainRenderer:
         self.screen.fill((10, 10, 20))
         self._draw_world(sim)
         self._draw_sidebar_background()
+        self._draw_wind_indicator(sim)
         # get_statistics() copies every agent list, so call it once per frame.
         stats = sim.get_statistics()
         self.chart.update(stats["grazers"], stats["rabbits"], stats["predators"], paused)
@@ -833,6 +846,8 @@ class MainRenderer:
     def _draw_world(self, sim: Simulation) -> None:
         self._ensure_world_layer(sim)
         self._blit_world_layer()
+        if self.show_scent:
+            self._draw_scent_overlay(sim)
         self._draw_entity_markers(sim)
 
     def _blit_world_layer(self) -> None:
@@ -990,6 +1005,123 @@ class MainRenderer:
             sy = int((y - self.camera_y) * scale + centre_y)
             if -1 <= sy <= self.view_h:
                 draw_line(screen, color, (span_left, sy), (span_right, sy))
+
+    def _draw_scent_overlay(self, sim: Simulation) -> None:
+        """Draw the scent field as a semi-transparent cyan overlay."""
+        if self.screen is None or sim is None:
+            return
+        scent = sim.env.scent
+        if scent is None or scent.size == 0:
+            return
+
+        map_height, map_width = scent.shape
+        cell = self.vis.cell_size
+        base_w = map_width * cell
+        base_h = map_height * cell
+
+        # Build alpha from scent intensity (0-1 -> 0-200)
+        alpha = np.clip(scent * 200, 0, 200).astype(np.uint8)
+        if alpha.max() == 0:
+            return
+
+        # Cyan colour for scent
+        cyan = np.array([0, 255, 255], dtype=np.uint8)
+        rgba = np.zeros((base_h, base_w, 4), dtype=np.uint8)
+        rgba[..., :3] = cyan
+        # Each cell expands to cell x cell pixels
+        cell_view = rgba.reshape(map_height, cell, map_width, cell, 4)
+        alpha_xy = alpha.transpose(1, 0)[:, None, :, None]
+        cell_view[..., 3] = alpha_xy
+
+        surface = pygame.image.frombuffer(rgba.tobytes(), (base_w, base_h), "RGBA")
+        self._blit_scaled_surface(surface)
+
+    def _blit_scaled_surface(self, surface) -> None:
+        """Blit a base-resolution surface through the current zoom/pan."""
+        if self.screen is None or self._base_size is None:
+            return
+        cell = max(1, self._base_cell)
+        zoom = self.zoom
+        origin_x = self.view_w * 0.5 - self.camera_x * cell * zoom
+        origin_y = self.view_h * 0.5 - self.camera_y * cell * zoom
+
+        width, height = surface.get_size()
+        u0 = _clamp_int(int(math.ceil(-origin_x)), 0, width)
+        u1 = _clamp_int(int(math.ceil(self.view_w - origin_x)), 0, width)
+        v0 = _clamp_int(int(math.ceil(-origin_y)), 0, height)
+        v1 = _clamp_int(int(math.ceil(self.view_h - origin_y)), 0, height)
+        if u1 <= u0 or v1 <= v0:
+            return
+
+        dest_x = int(round(origin_x)) + u0
+        dest_y = int(round(origin_y)) + v0
+        source = pygame.Rect(u0, v0, u1 - u0, v1 - v0)
+        self.screen.blit(surface, (dest_x, dest_y), source)
+
+    def _draw_wind_indicator(self, sim: Simulation) -> None:
+        """Draw wind direction arrow and intensity bar in the sidebar."""
+        if self.screen is None or self.font is None or sim is None:
+            return
+
+        sidebar = self._sidebar_rect()
+        margin = self.SIDEBAR_MARGIN
+        x = sidebar.x + margin
+        y = margin
+        width = sidebar.width - 2 * margin
+        if width <= 0:
+            return
+
+        # Wind direction (radians) and intensity (0-1)
+        wind_dir = sim._wind_dir
+        wind_intensity = sim._wind_intensity
+
+        # Draw "WIND" label
+        label = self.font.render("WIND", True, (180, 220, 255))
+        self.screen.blit(label, (x + 4, y))
+
+        # Arrow pointing in wind direction
+        arrow_size = 24
+        cx = x + width - arrow_size - 8
+        cy = y + arrow_size // 2 + 4
+        # Arrow shaft end (pointing INTO the wind direction)
+        angle = wind_dir
+        shaft_len = arrow_size - 4
+        tip_x = cx + int(np.cos(angle) * shaft_len)
+        tip_y = cy + int(np.sin(angle) * shaft_len)
+        base_x = cx - int(np.cos(angle) * (shaft_len // 2))
+        base_y = cy - int(np.sin(angle) * (shaft_len // 2))
+
+        # Arrow color based on intensity (cyan to blue)
+        intensity_color = (
+            int(100 + 155 * wind_intensity),
+            int(200 + 55 * wind_intensity),
+            255,
+        )
+        pygame.draw.line(self.screen, intensity_color, (base_x, base_y), (tip_x, tip_y), 3)
+
+        # Arrow head
+        head_len = 8
+        head_angle = np.pi / 6
+        left_x = tip_x - int(np.cos(angle - head_angle) * head_len)
+        left_y = tip_y - int(np.sin(angle - head_angle) * head_len)
+        right_x = tip_x - int(np.cos(angle + head_angle) * head_len)
+        right_y = tip_y - int(np.sin(angle + head_angle) * head_len)
+        pygame.draw.polygon(self.screen, intensity_color, [(tip_x, tip_y), (left_x, left_y), (right_x, right_y)])
+
+        # Intensity bar
+        bar_x = x + 4
+        bar_y = y + 24
+        bar_w = width - 8
+        bar_h = 10
+        pygame.draw.rect(self.screen, (40, 40, 60), (bar_x, bar_y, bar_w, bar_h))
+        pygame.draw.rect(self.screen, (80, 80, 100), (bar_x, bar_y, bar_w, bar_h), 1)
+        fill_w = int(bar_w * wind_intensity)
+        if fill_w > 0:
+            pygame.draw.rect(self.screen, intensity_color, (bar_x, bar_y, fill_w, bar_h))
+
+        # Percentage text
+        pct_text = self.small_font.render(f"{int(wind_intensity * 100)}%", True, (170, 190, 220))
+        self.screen.blit(pct_text, (bar_x + bar_w + 4, bar_y - 1))
 
     # ------------------------------------------------------------------- legend
 
