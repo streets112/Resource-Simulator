@@ -8,7 +8,7 @@ simulation:
   simulation_speed: 1.0
 
 environment:
-  ocean_border_width: 10
+  ocean_border_width: 5
   terrain_types:
     ocean:
       color: [30, 60, 180]
