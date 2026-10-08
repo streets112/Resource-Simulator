@@ -747,9 +747,11 @@ class MainRenderer:
         if shade is not None:
             self._paint_world(colors, shade, full=False)
         self._base_step = sim.current_step
-        if not self._frombuffer_aliases:  # pragma: no cover - defensive
-            self._base_surface = self._surface_from_pixels(self._base_pixels)
-            self._invalidate_scale_cache()
+        # Always invalidate the scale cache so the scaled surface is regenerated
+        # from the updated base surface. This is necessary even when
+        # _frombuffer_aliases is True because the base surface pixels were
+        # modified in-place and the cached scaled surface is stale.
+        self._invalidate_scale_cache()
 
     def _ensure_world_layer(self, sim: Simulation) -> None:
         terrain_changed, resources_changed = self._world_layer_state(sim)
@@ -772,7 +774,8 @@ class MainRenderer:
             return
 
         key = (self.zoom, self._base_size)
-        if self._scale_key == key:
+        # Only skip regeneration if nothing at all has changed
+        if self._scale_key == key and not (terrain_changed or encoding_changed or resources_changed):
             return
 
         base_w, base_h = self._base_size
@@ -787,7 +790,7 @@ class MainRenderer:
             # Too large to keep resident: resample only the visible window each
             # frame instead of holding a ~150 MB surface in memory.
             self._scaled_surface = None
-            self._scaled_size = None
+            self._scaled_size = (target_w, target_h)
         self._scale_key = key
 
     # ----------------------------------------------------------------- render
