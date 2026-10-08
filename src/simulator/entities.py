@@ -130,6 +130,7 @@ class Predator(Entity):
     chase_radius: int = 7
     resource_sense_radius: int = 10
     eating_state: str = "moving"
+    behavior_state: str = "wandering"
     investigate_y: Optional[int] = None
     investigate_x: Optional[int] = None
     investigate_timer: int = 0

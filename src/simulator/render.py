@@ -344,8 +344,10 @@ class MainRenderer:
         margin = self.SIDEBAR_MARGIN
         sidebar = self._sidebar_rect()
         width = _clamp_int(sidebar.width - 2 * margin, margin, max(margin, sidebar.width - margin))
-        height = _clamp_int(260, margin, max(margin, sidebar.height - 2 * margin))
-        self.chart.set_bounds(sidebar.x + margin, margin, width, height)
+        wind_height = 44
+        inspect_height = self._inspect_pane_height()
+        height = _clamp_int(260, margin, max(margin, sidebar.height - 2 * margin - wind_height - inspect_height))
+        self.chart.set_bounds(sidebar.x + margin, margin + wind_height + inspect_height, width, height)
 
     def _cell_pixels(self) -> float:
         """Screen pixels spanned by one world cell at the current zoom."""
@@ -418,6 +420,7 @@ class MainRenderer:
                     self._last_mouse = event.pos
                 if self.creator_mode and self.hover is not None:
                     self._paint_at(*self.hover)
+                self._place_chart()
                 self.dirty = True
         return None
 
@@ -803,8 +806,10 @@ class MainRenderer:
 
         self.screen.fill((10, 10, 20))
         self._draw_world(sim)
+        self._draw_inspect_highlight(sim)
         self._draw_sidebar_background()
         self._draw_wind_indicator(sim)
+        self._draw_inspect_pane(sim)
         # get_statistics() copies every agent list, so call it once per frame.
         stats = sim.get_statistics()
         self.chart.update(stats["grazers"], stats["rabbits"], stats["predators"], paused)
@@ -1033,6 +1038,12 @@ class MainRenderer:
         rgba[..., 3] = np.clip(scent.repeat(cell, axis=0).repeat(cell, axis=1) * 200, 0, 200).astype(np.uint8)
 
         surface = pygame.image.frombuffer(rgba.tobytes(), (map_width * cell, map_height * cell), "RGBA")
+
+        if abs(self.zoom - 1.0) > 1e-9:
+            target_w = max(1, int(round(map_width * cell * self.zoom)))
+            target_h = max(1, int(round(map_height * cell * self.zoom)))
+            surface = pygame.transform.smoothscale(surface, (target_w, target_h))
+
         self._blit_scaled_surface(surface)
 
     def _blit_scaled_surface(self, surface) -> None:
@@ -1058,7 +1069,7 @@ class MainRenderer:
         self.screen.blit(surface, (dest_x, dest_y), source)
 
     def _draw_wind_indicator(self, sim: Simulation) -> None:
-        """Draw wind direction arrow and intensity bar in the sidebar."""
+        """Draw wind direction arrow and intensity text in the sidebar."""
         if self.screen is None or self.font is None or sim is None:
             return
 
@@ -1070,19 +1081,15 @@ class MainRenderer:
         if width <= 0:
             return
 
-        # Wind direction (radians) and intensity (0-1)
         wind_dir = sim._wind_dir
         wind_intensity = sim._wind_intensity
 
-        # Draw "WIND" label
         label = self.font.render("WIND", True, (180, 220, 255))
         self.screen.blit(label, (x + 4, y))
 
-        # Arrow pointing in wind direction
-        arrow_size = 24
+        arrow_size = 32
         cx = x + width - arrow_size - 8
         cy = y + arrow_size // 2 + 4
-        # Arrow shaft end (pointing INTO the wind direction)
         angle = wind_dir
         shaft_len = arrow_size - 4
         tip_x = cx + int(np.cos(angle) * shaft_len)
@@ -1090,7 +1097,6 @@ class MainRenderer:
         base_x = cx - int(np.cos(angle) * (shaft_len // 2))
         base_y = cy - int(np.sin(angle) * (shaft_len // 2))
 
-        # Arrow color based on intensity (cyan to blue)
         intensity_color = (
             int(100 + 155 * wind_intensity),
             int(200 + 55 * wind_intensity),
@@ -1098,7 +1104,6 @@ class MainRenderer:
         )
         pygame.draw.line(self.screen, intensity_color, (base_x, base_y), (tip_x, tip_y), 3)
 
-        # Arrow head
         head_len = 8
         head_angle = np.pi / 6
         left_x = tip_x - int(np.cos(angle - head_angle) * head_len)
@@ -1107,20 +1112,123 @@ class MainRenderer:
         right_y = tip_y - int(np.sin(angle + head_angle) * head_len)
         pygame.draw.polygon(self.screen, intensity_color, [(tip_x, tip_y), (left_x, left_y), (right_x, right_y)])
 
-        # Intensity bar
-        bar_x = x + 4
-        bar_y = y + 24
-        bar_w = width - 8
-        bar_h = 10
-        pygame.draw.rect(self.screen, (40, 40, 60), (bar_x, bar_y, bar_w, bar_h))
-        pygame.draw.rect(self.screen, (80, 80, 100), (bar_x, bar_y, bar_w, bar_h), 1)
-        fill_w = int(bar_w * wind_intensity)
-        if fill_w > 0:
-            pygame.draw.rect(self.screen, intensity_color, (bar_x, bar_y, fill_w, bar_h))
-
-        # Percentage text
         pct_text = self.small_font.render(f"{int(wind_intensity * 100)}%", True, (170, 190, 220))
-        self.screen.blit(pct_text, (bar_x + bar_w + 4, bar_y - 1))
+        text_rect = pct_text.get_rect()
+        text_rect.midright = (cx - 8, cy)
+        self.screen.blit(pct_text, text_rect)
+
+    def _inspect_pane_height(self) -> int:
+        if self.hover is None or self.sim is None:
+            return 0
+        y, x = self.hover
+        info = self._get_cell_info(y, x)
+        entity_count = sum(len(v) for v in info["entities"].values())
+        rows = 5 + entity_count
+        return 20 + rows * 18 + 10
+
+    def _draw_inspect_highlight(self, sim: Simulation) -> None:
+        if self.hover is None:
+            return
+        y, x = self.hover
+        scale = self._cell_pixels()
+        cam_x, cam_y = self.camera_x, self.camera_y
+        centre_x = self.view_w * 0.5
+        centre_y = self.view_h * 0.5
+        sx = int((x - cam_x) * scale + centre_x)
+        sy = int((y - cam_y) * scale + centre_y)
+        cell_px = max(1, int(round(scale)))
+        rect = pygame.Rect(sx, sy, cell_px, cell_px)
+        pygame.draw.rect(self.screen, (255, 255, 0), rect, 2)
+
+    def _get_cell_info(self, y: int, x: int) -> dict:
+        sim = self.sim
+        info: dict = {
+            "terrain": "unknown",
+            "passable": False,
+            "mobility_prey": 0.0,
+            "mobility_predator": 0.0,
+            "resource": 0.0,
+            "capacity": 0.0,
+            "ratio": 0.0,
+            "entities": {
+                "grazers": [],
+                "rabbits": [],
+                "predators": [],
+                "carcasses": [],
+            },
+        }
+        if sim is None:
+            return info
+        env = sim.env
+        if not env.in_bounds(y, x):
+            return info
+        info["terrain"] = env.get_terrain_at(y, x)
+        info["passable"] = bool(env.passable[y, x])
+        info["mobility_prey"] = float(env.mobility_prey[y, x])
+        info["mobility_predator"] = float(env.mobility_predator[y, x])
+        info["resource"] = float(env.resources[y, x])
+        info["capacity"] = float(env.resource_capacity[y, x])
+        info["ratio"] = float(env.get_resource_ratio(y, x))
+        for prey in sim.grazers:
+            if int(prey.y) == y and int(prey.x) == x:
+                info["entities"]["grazers"].append(prey)
+        for prey in sim.rabbits:
+            if int(prey.y) == y and int(prey.x) == x:
+                info["entities"]["rabbits"].append(prey)
+        for predator in sim.predators:
+            if int(predator.y) == y and int(predator.x) == x:
+                info["entities"]["predators"].append(predator)
+        for carcass in sim.carcasses:
+            if int(carcass.y) == y and int(carcass.x) == x and carcass.provides_energy:
+                info["entities"]["carcasses"].append(carcass)
+        return info
+
+    def _draw_inspect_pane(self, sim: Simulation) -> None:
+        if self.hover is None or self.small_font is None:
+            return
+        y, x = self.hover
+        info = self._get_cell_info(y, x)
+        margin = self.SIDEBAR_MARGIN
+        sidebar = self._sidebar_rect()
+        pane_x = sidebar.x + margin
+        pane_y = margin + 44
+        pane_w = sidebar.width - 2 * margin
+        line_height = 16
+        lines = [
+            f"cell ({x}, {y})",
+            f"terrain: {info['terrain']}",
+            f"passable: {info['passable']}",
+            f"mob prey: {info['mobility_prey']:.2f}  pred: {info['mobility_predator']:.2f}",
+            f"resource: {info['resource']:.1f}/{info['capacity']:.1f} ({info['ratio']*100:.0f}%)",
+        ]
+        for kind, label in (("grazers", "grazer"), ("rabbits", "rabbit"), ("predators", "predator"), ("carcasses", "carcass")):
+            entities = info["entities"][kind]
+            if not entities:
+                continue
+            lines.append(f"{label}:")
+            for entity in entities:
+                if kind == "predators":
+                    state = entity.behavior_state
+                    if entity.eating_state != "moving":
+                        state = entity.eating_state
+                    lines.append(
+                        f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {state}"
+                    )
+                elif kind == "carcass":
+                    lines.append(
+                        f"  id {entity.id}  e {entity.energy:.1f}  age {entity.age}"
+                    )
+                else:
+                    lines.append(
+                        f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {entity.foraging_state}"
+                    )
+        pane_h = 8 + len(lines) * line_height + 6
+        overlay = pygame.Surface((pane_w, pane_h), pygame.SRCALPHA)
+        overlay.fill((0, 0, 0, 185))
+        self.screen.blit(overlay, (pane_x, pane_y))
+        for i, text in enumerate(lines):
+            surface = self.small_font.render(text, True, (220, 220, 230))
+            self.screen.blit(surface, (pane_x + 6, pane_y + 6 + i * line_height))
 
     # ------------------------------------------------------------------- legend
 
