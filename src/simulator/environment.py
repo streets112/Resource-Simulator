@@ -421,7 +421,7 @@ class Environment:
         scent spreads to ~6 cells width with ~1/6 intensity.
         """
         # Decay: scent fades over time
-        self.scent *= 0.98  # 2% decay per step
+        self.scent *= 0.99  # 1% decay per step
         
         # Advection: wind pushes scent downwind
         if wind_intensity > 0.01:
@@ -430,8 +430,8 @@ class Environment:
             
             # Use upwind scheme for advection (more stable)
             advected = np.zeros_like(self.scent)
-            shift_y = int(round(wind_dy * 2))
-            shift_x = int(round(wind_dx * 2))
+            shift_y = int(round(wind_dy * 4))
+            shift_x = int(round(wind_dx * 4))
             
             if shift_y >= 0:
                 advected[shift_y:, :] = self.scent[:-shift_y if shift_y else None, :]
@@ -448,7 +448,7 @@ class Environment:
         
         # Diffusion: spread scent to neighbors (Gaussian-like spread)
         # This creates the 20 cells = 6 cells width, 1/6 intensity effect
-        laplacian = nd_convolve(self.scent, _LAPLACIAN_KERNEL * 0.2, mode="wrap")
+        laplacian = nd_convolve(self.scent, _LAPLACIAN_KERNEL * 0.05, mode="wrap")
         self.scent += laplacian
         
         np.clip(self.scent, 0.0, 1.0, out=self.scent)
