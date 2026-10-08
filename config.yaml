@@ -200,6 +200,14 @@ predator:
   hunt_energy_threshold: 0.4
   # When satiated, patrol toward areas with highest prey concentration
   patrol_toward_prey: true
+  # Scent tracking
+  scent_radius: 20
+  # Patrolling
+  patrol_vision_range: 15
+  patrol_speed: 0.5
+  # Pack dynamics
+  max_pack_size: 15
+  split_push_distance: 8
 
 carcass:
   decay_rate: 0.98

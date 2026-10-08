@@ -722,6 +722,13 @@ class Simulation:
     # -------------------------------------------------------------- predators
 
     def _update_predators(self) -> None:
+        # Update wind: slowly shift direction and intensity
+        self._wind_dir += float(self.rng.normal(0, 0.08))
+        self._wind_dir %= 2 * np.pi
+        self._wind_intensity = float(np.clip(
+            self._wind_intensity + self.rng.normal(0, 0.08), 0.1, 1.0
+        ))
+
         # Reset the transient behaviour label; "feeding" only suppresses movement
         # for the single step in which a predator actually drew on a carcass.
         for predator in self.predators:
@@ -842,58 +849,63 @@ class Simulation:
         # Check satiety: predators only hunt when energy is below threshold
         hungry = predator.energy < cfg.hunt_energy_threshold * predator.max_energy
 
-        mode = "wander"
-        if pack and self.rng.random() < cfg.pack_hunt_chance:
-            mode = "pack_hunt"
-        elif self._solo_target(predator) is not None:
-            mode = "solo"
+        # Priority 1: Direct sight of prey -> chase
+        solo_target = self._solo_target(predator)
+        pack_target = self._pack_target(predator, self._pack_mates(predator)) if self._pack_mates(predator) else None
 
-        # Only hunt if hungry
-        if hungry:
-            if mode == "pack_hunt":
-                target = self._pack_target(predator, pack)
-                if target is not None:
-                    flank = pack_center is not None and self.rng.random() < cfg.flank_chance
-                    goal = self._flank_goal(target, pack_center) if flank else (
-                        int(target.y),
-                        int(target.x),
-                    )
-                    self._move_predator_toward(predator, goal[0], goal[1], chasing=True)
-                    return
+        if solo_target is not None:
+            self._move_predator_toward(predator, int(solo_target.y), int(solo_target.x), chasing=True)
+            return
 
-            if mode == "solo":
-                target = self._solo_target(predator)
-                if target is not None:
-                    self._move_predator_toward(predator, int(target.y), int(target.x), chasing=True)
-                    return
+        if pack and self.rng.random() < self.config.predator.pack_hunt_chance and pack_target is not None:
+            flank = self._centroid(self._pack_mates(predator)) is not None and self.rng.random() < self.config.predator.flank_chance
+            goal = self._flank_goal(solo_target, self._centroid(self._pack_mates(predator))) if flank else (int(solo_target.y), int(solo_target.x))
+            self._move_predator_toward(predator, goal[0], goal[1], chasing=True)
+            return
 
         # Split large packs
-        self._maybe_split_pack(predator, pack)
+        self._maybe_split_pack(predator, self._pack_mates(predator))
 
-        # If satiated and patrol_toward_prey is enabled, move toward high prey density
-        if not hungry and cfg.patrol_toward_prey:
+        # Only hunt if hungry
+        hungry = predator.energy < self.config.predator.hunt_energy_threshold * predator.max_energy
+
+        if hungry:
+            # Priority 2: Follow resource gradient to find prey eating it
+            resource_target = self._resource_gradient_target(predator)
+            if resource_target is not None:
+                self._move_predator_toward(predator, resource_target[0], resource_target[1])
+                return
+
+            # Priority 3: Follow scent gradient downwind
+            scent = self._scent_gradient(predator)
+            if scent is not None:
+                ty = int(predator.y + scent[0] * 5)
+                tx = int(predator.x + scent[1] * 5)
+                ty, tx = self.env.clamp(ty, tx)
+                self._move_predator_toward(predator, ty, tx)
+                return
+
+        # Priority 4: Satiated - patrol toward high prey density areas
+        if cfg.patrol_toward_prey:
             prey_target = self._prey_density_target(predator)
             if prey_target is not None:
                 self._move_predator_toward(predator, prey_target[0], prey_target[1])
                 return
 
-        # No prey in sight: follow resource gradient to find prey
-        resource_target = self._resource_gradient_target(predator)
-        if resource_target is not None:
-            self._move_predator_toward(predator, resource_target[0], resource_target[1])
-            return
+        # Priority 5: No prey in sight, no resource gradient, no scent - patrol
+        if cfg.patrol_toward_prey:
+            prey_target = self._prey_density_target(predator)
+            if prey_target is not None:
+                self._move_predator_toward(predator, prey_target[0], prey_target[1])
+                return
 
-        # No resource gradient: follow scent downwind
-        scent = self._scent_gradient(predator)
-        if scent is not None:
-            ty = int(predator.y + scent[0] * 5)
-            tx = int(predator.x + scent[1] * 5)
-            ty, tx = self.env.clamp(ty, tx)
-            self._move_predator_toward(predator, ty, tx)
+        # Fallback: investigate depletion or wander
+        if self._investigate_depletion(predator):
             return
-
-        # No scent: patrol with long-distance vision
-        self._predator_patrol(predator, pack, pack_center)
+        if pack and self._centroid(self._pack_mates(predator)) is not None and self.rng.random() < self.config.predator.pack_wander_chance:
+            self._move_predator_toward(predator, self._centroid(self._pack_mates(predator))[0], self._centroid(self._pack_mates(predator))[1])
+            return
+        self._predator_wander(predator)
 
     def _resource_gradient_target(self, predator: Predator) -> tuple[int, int] | None:
         """Find the cell with the highest resource ratio within sense radius."""

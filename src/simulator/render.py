@@ -1019,8 +1019,6 @@ class MainRenderer:
 
         map_height, map_width = scent.shape
         cell = self.vis.cell_size
-        base_w = map_width * cell
-        base_h = map_height * cell
 
         # Build alpha from scent intensity (0-1 -> 0-200)
         alpha = np.clip(scent * 200, 0, 200).astype(np.uint8)
@@ -1029,14 +1027,12 @@ class MainRenderer:
 
         # Cyan colour for scent
         cyan = np.array([0, 255, 255], dtype=np.uint8)
-        rgba = np.zeros((base_h, base_w, 4), dtype=np.uint8)
+        rgba = np.zeros((map_height * cell, map_width * cell, 4), dtype=np.uint8)
         rgba[..., :3] = cyan
-        # Each cell expands to cell x cell pixels
-        cell_view = rgba.reshape(map_height, cell, map_width, cell, 4)
-        alpha_xy = alpha.transpose(1, 0)[:, None, :, None]
-        cell_view[..., 3] = alpha_xy
+        # Each cell expands to cell x cell pixels - expand scent to pixel grid
+        rgba[..., 3] = np.clip(scent.repeat(cell, axis=0).repeat(cell, axis=1) * 200, 0, 200).astype(np.uint8)
 
-        surface = pygame.image.frombuffer(rgba.tobytes(), (base_w, base_h), "RGBA")
+        surface = pygame.image.frombuffer(rgba.tobytes(), (map_width * cell, map_height * cell), "RGBA")
         self._blit_scaled_surface(surface)
 
     def _blit_scaled_surface(self, surface) -> None:
