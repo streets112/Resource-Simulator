@@ -1,3 +1,4 @@
+import math
 import numpy as np
 from dataclasses import dataclass, field
 
@@ -136,6 +137,11 @@ class Simulation:
         # the environment so heavily worked ground cannot regenerate.
         self._grazed = np.zeros((self.map_height, self.map_width), dtype=np.int32)
 
+        # Virtual wind for predator scent tracking. Direction (radians), intensity 0-1.
+        self._wind_dir = float(self.rng.uniform(0, 2 * np.pi))
+        self._wind_intensity = float(self.rng.uniform(0.3, 1.0))
+        self._wind_change_rate = 0.15
+
         self._refresh_fields()
         self._spawn_initial_entities()
 
@@ -171,6 +177,49 @@ class Simulation:
             out=np.zeros_like(self.env.resources),
             where=capacity > 0,
         )
+
+    def _update_wind(self) -> None:
+        """Drift the virtual wind direction and intensity."""
+        self._wind_dir += float(self.rng.normal(0, self._wind_change_rate))
+        self._wind_dir %= 2 * np.pi
+        self._wind_intensity = float(np.clip(
+            self._wind_intensity + self.rng.normal(0, 0.08), 0.1, 1.0
+        ))
+
+    def _scent_gradient(self, predator: Predator) -> tuple[float, float] | None:
+        """Return (dy, dx) scent gradient for the predator, or None.
+
+        Scent flows downwind from prey positions. Predators use gradient descent
+        to follow the strongest scent concentration.
+        """
+        py, px = int(predator.y), int(predator.x)
+        radius = self.config.predator.scent_radius
+        y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
+        x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
+
+        # Scent strength from prey in the neighbourhood, weighted by distance
+        # and carried downwind.
+        wind_x = float(np.cos(self._wind_dir)) * self._wind_intensity
+        wind_y = float(np.sin(self._wind_dir)) * self._wind_intensity
+
+        grad_y = grad_x = 0.0
+        found = False
+        for prey in self._prey_index.query(y0, y1 - 1, x0, x1 - 1):
+            if not prey.alive:
+                continue
+            ty, tx = int(prey.y), int(prey.x)
+            dy = ty - py
+            dx = tx - px
+            dist = max(1, self.distance(py, px, ty, tx))
+            # Scent is stronger closer and further downwind
+            strength = (1.0 / dist) * (1.0 + wind_x * dx + wind_y * dy)
+            grad_y += (ty - py) * strength / dist
+            grad_x += (tx - px) * strength / dist
+            found = True
+
+        if not found:
+            return None
+        return (grad_y, grad_x)
 
     def _build_indices(self) -> None:
         """Snapshot alive agents into spatial indices for neighbour queries."""
@@ -338,7 +387,7 @@ class Simulation:
     # ------------------------------------------------------------------ loop
 
     def step(self) -> None:
-        self.env.step(occupied=self._grazed)
+        self.env.step(occupied=self._grazed, wind_dir=self._wind_dir, wind_intensity=self._wind_intensity)
         self._refresh_fields()
         self._build_indices()
 
@@ -400,6 +449,17 @@ class Simulation:
                 or energy_ratio >= cfg.wander_energy_threshold
             ):
                 return "migrating"
+            # If stationary intake has dropped below what moving would give
+            # on a full cell, leave before the cell is stripped.
+            stationary = cfg.energy_from_resource * cfg.grazing_efficiency * (0.4 + 0.6 * math.exp(-5.0 * (1.0 - ratio)))
+            moving_baseline = cfg.energy_from_resource * cfg.moving_efficiency
+            if stationary < moving_baseline and energy_ratio > cfg.graze_resume_energy:
+                return "migrating"
+            return "grazing"
+
+        # Starvation escape: if critically low, settle on ANY passable cell
+        # rather than burning energy travelling on bare ground.
+        if energy_ratio <= cfg.graze_resume_energy * 0.5:
             return "grazing"
 
         # Travelling: only settle once genuinely hungry, and only on good ground.
@@ -408,6 +468,12 @@ class Simulation:
             and ratio >= cfg.graze_ratio_threshold
         ):
             return "grazing"
+        
+        # High resource opportunity: if local resources are abundant, 
+        # stop and graze even if not critically hungry
+        if ratio >= cfg.graze_ratio_threshold * 1.5 and energy_ratio > cfg.graze_resume_energy:
+            return "grazing"
+        
         return "migrating"
 
     def _update_prey(self, flock: list, cfg, kind: str) -> None:
@@ -643,6 +709,9 @@ class Simulation:
             py, px = ny, nx
             moved += 1
 
+            # Deposit scent as prey moves
+            self.env._add_scent(py, px, 0.15)
+
         prey.energy -= moved * cfg.movement_energy_cost * cost_multiplier
         if prey.energy <= 0:
             prey.energy = 0.0
@@ -770,38 +839,177 @@ class Simulation:
         pack = self._pack_mates(predator)
         pack_center = self._centroid(pack) if pack else None
 
+        # Check satiety: predators only hunt when energy is below threshold
+        hungry = predator.energy < cfg.hunt_energy_threshold * predator.max_energy
+
         mode = "wander"
         if pack and self.rng.random() < cfg.pack_hunt_chance:
             mode = "pack_hunt"
         elif self._solo_target(predator) is not None:
             mode = "solo"
 
-        if mode == "pack_hunt":
-            target = self._pack_target(predator, pack)
-            if target is not None:
-                flank = pack_center is not None and self.rng.random() < cfg.flank_chance
-                goal = self._flank_goal(target, pack_center) if flank else (
-                    int(target.y),
-                    int(target.x),
-                )
-                self._move_predator_toward(predator, goal[0], goal[1], chasing=True)
+        # Only hunt if hungry
+        if hungry:
+            if mode == "pack_hunt":
+                target = self._pack_target(predator, pack)
+                if target is not None:
+                    flank = pack_center is not None and self.rng.random() < cfg.flank_chance
+                    goal = self._flank_goal(target, pack_center) if flank else (
+                        int(target.y),
+                        int(target.x),
+                    )
+                    self._move_predator_toward(predator, goal[0], goal[1], chasing=True)
+                    return
+
+            if mode == "solo":
+                target = self._solo_target(predator)
+                if target is not None:
+                    self._move_predator_toward(predator, int(target.y), int(target.x), chasing=True)
+                    return
+
+        # Split large packs
+        self._maybe_split_pack(predator, pack)
+
+        # If satiated and patrol_toward_prey is enabled, move toward high prey density
+        if not hungry and cfg.patrol_toward_prey:
+            prey_target = self._prey_density_target(predator)
+            if prey_target is not None:
+                self._move_predator_toward(predator, prey_target[0], prey_target[1])
                 return
 
-        if mode == "solo":
-            target = self._solo_target(predator)
-            if target is not None:
-                self._move_predator_toward(predator, int(target.y), int(target.x), chasing=True)
-                return
-
-        # No prey in sight: infer their presence from stripped ground.
-        if self._investigate_depletion(predator):
+        # No prey in sight: follow resource gradient to find prey
+        resource_target = self._resource_gradient_target(predator)
+        if resource_target is not None:
+            self._move_predator_toward(predator, resource_target[0], resource_target[1])
             return
+
+        # No resource gradient: follow scent downwind
+        scent = self._scent_gradient(predator)
+        if scent is not None:
+            ty = int(predator.y + scent[0] * 5)
+            tx = int(predator.x + scent[1] * 5)
+            ty, tx = self.env.clamp(ty, tx)
+            self._move_predator_toward(predator, ty, tx)
+            return
+
+        # No scent: patrol with long-distance vision
+        self._predator_patrol(predator, pack, pack_center)
+
+    def _resource_gradient_target(self, predator: Predator) -> tuple[int, int] | None:
+        """Find the cell with the highest resource ratio within sense radius."""
+        cfg = self.config.predator
+        py, px = int(predator.y), int(predator.x)
+        radius = max(1, int(cfg.resource_sense_radius * self.env.visibility(py, px, predator=True)))
+        y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
+        x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
+
+        ratios = self._ratios[y0:y1, x0:x1]
+        reachable = self.env.passable[y0:y1, x0:x1]
+        if not reachable.any():
+            return None
+
+        masked = np.where(reachable, ratios, -np.inf)
+        best = int(np.argmax(masked))
+        if not np.isfinite(masked.flat[best]):
+            return None
+        return y0 + best // masked.shape[1], x0 + best % masked.shape[1]
+
+    def _prey_density_target(self, predator: Predator) -> tuple[int, int] | None:
+        """Find the cell with highest prey density within patrol range."""
+        cfg = self.config.predator
+        py, px = int(predator.y), int(predator.x)
+        radius = cfg.patrol_vision_range
+        y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
+        x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
+
+        # Count prey in each cell
+        prey_counts = np.zeros((y1 - y0, x1 - x0), dtype=int)
+        for prey in self.grazers + self.rabbits:
+            if prey.alive:
+                ry, rx = int(prey.y), int(prey.x)
+                if y0 <= ry < y1 and x0 <= rx < x1:
+                    prey_counts[ry - y0, rx - x0] += 1
+
+        if prey_counts.max() == 0:
+            return None
+
+        # Weight by distance (prefer closer high-density areas)
+        y_idx, x_idx = np.unravel_index(prey_counts.argmax(), prey_counts.shape)
+        return y0 + y_idx, x0 + x_idx
+
+    def _predator_patrol(self, predator: Predator, pack: list, pack_center: tuple[int, int] | None) -> None:
+        """Long-distance patrol: move toward pack center or a random distant cell."""
+        cfg = self.config.predator
+        py, px = int(predator.y), int(predator.x)
 
         if pack and pack_center is not None and self.rng.random() < cfg.pack_wander_chance:
             self._move_predator_toward(predator, pack_center[0], pack_center[1])
             return
 
-        self._predator_wander(predator)
+        # Patrol toward a random distant cell for long-distance coverage
+        vision = cfg.patrol_vision_range
+        angle = self.rng.uniform(0, 2 * np.pi)
+        ty = int(py + np.cos(angle) * vision)
+        tx = int(px + np.sin(angle) * vision)
+        ty, tx = self.env.clamp(ty, tx)
+        self._move_predator_toward(predator, ty, tx)
+
+    def _maybe_split_pack(self, predator: Predator, pack: list[Predator]) -> None:
+        """Split large packs into smaller groups that move apart.
+
+        When a pack exceeds max_pack_size, it splits into roughly equal
+        subgroups that are pushed apart from each other.
+        """
+        cfg = self.config.predator
+        if len(pack) + 1 < cfg.max_pack_size:
+            return
+
+        # Include the current predator in the pack
+        all_pack = pack + [predator]
+        if len(all_pack) < cfg.max_pack_size:
+            return
+
+        # Split into roughly equal groups
+        split_count = (len(all_pack) + cfg.max_pack_size - 1) // cfg.max_pack_size
+        if split_count < 2:
+            return
+
+        # Sort by ID for deterministic splitting
+        all_pack.sort(key=lambda p: p.id)
+
+        # Distribute into split_count groups
+        groups = [[] for _ in range(split_count)]
+        for i, p in enumerate(all_pack):
+            groups[i % split_count].append(p)
+
+        # Find the group this predator belongs to
+        my_group_idx = next(i for i, g in enumerate(groups) if predator in g)
+        my_group = groups[my_group_idx]
+
+        # Compute center of my group
+        my_center_y = int(round(sum(p.y for p in my_group) / len(my_group)))
+        my_center_x = int(round(sum(p.x for p in my_group) / len(my_group)))
+
+        # Push away from other group centers
+        push_dy = push_dx = 0.0
+        push_dist = float(cfg.split_push_distance)
+        for i, g in enumerate(groups):
+            if i == my_group_idx:
+                continue
+            g_center_y = int(round(sum(p.y for p in g) / len(g)))
+            g_center_x = int(round(sum(p.x for p in g) / len(g)))
+            dy = my_center_y - g_center_y
+            dx = my_center_x - g_center_x
+            dist = max(1, int(np.sqrt(dy * dy + dx * dx)))
+            if dist > 0:
+                push_dy += push_dist * dy / dist
+                push_dx += push_dist * dx / dist
+
+        # Apply push
+        target_y = int(my_center_y + push_dy)
+        target_x = int(my_center_x + push_dx)
+        target_y, target_x = self.env.clamp(target_y, target_x)
+        self._move_predator_toward(predator, target_y, target_x)
 
     def _pack_mates(self, predator: Predator) -> list[Predator]:
         radius = self.config.predator.pack_radius

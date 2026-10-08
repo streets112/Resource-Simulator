@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Optional, Protocol
+import math
 
 _IDS = count(1)
 
@@ -88,26 +89,18 @@ class Prey(Entity):
         self.gradient_weight = float(min(1.0, max(0.0, self.gradient_weight)))
 
     def eat(self, env: HasResourceField, efficiency_scale: float = 1.0) -> float:
-        """SPECIFICATION.md resource consumption.
+        """Resource consumption with exponential extraction decay.
 
-        efficiency = max(min_efficiency, resource_ratio) * efficiency_scale
-        eaten      = consume_resource(y, x, energy_from_resource * efficiency)
-        energy    <- min(max_energy, energy + eaten)
-
-        efficiency_scale lets a species feed at a reduced rate while travelling
-        and a high rate while standing still, which is what turns continuous
-        grazing into stop-and-go foraging.
-
-        Terrain productivity then taxes whatever is left after metabolism:
-        net = (intake - metabolism) * productivity, so plains banks the whole
-        surplus and forest only a third of it. The intake formula itself is
-        unchanged, which keeps the documented consumption model intact.
+        Extraction rate decays exponentially from 100% at full capacity to
+        40% near zero, so depleted cells yield progressively less.
         """
         y, x = int(self.y), int(self.x)
         ratio = env.get_resource_ratio(y, x)
         if ratio <= 0:
             return 0.0
-        efficiency = max(float(self.config.min_efficiency), ratio) * efficiency_scale
+        # Exponential decay: 100% at ratio=1, 40% at ratio=0
+        extraction = 0.4 + 0.6 * math.exp(-5.0 * (1.0 - ratio))
+        efficiency = max(float(self.config.min_efficiency), extraction) * efficiency_scale
         taken = env.consume_resource(y, x, float(self.config.energy_from_resource) * efficiency)
         gained = self.add_energy(taken)
 

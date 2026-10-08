@@ -47,6 +47,10 @@ class Environment:
         # strip it; a lone animal passing through does not freeze the ground.
         self.occupied = np.zeros((height, width), dtype=np.int32)
 
+        # Scent field for predator tracking. Deposited by prey, diffuses with wind,
+        # decays over time. Higher = fresher/more concentrated scent.
+        self.scent = np.zeros((height, width), dtype=np.float64)
+
         self._generate_terrain_biomes()
         self._snapshot_resources()
         self._initialize_resources()
@@ -294,15 +298,68 @@ class Environment:
         replace = keep & (self.terrain[ys.clip(0, h - 1), xs.clip(0, w - 1)] == rock)
         self.terrain[ys[replace], xs[replace]] = plains
 
+    def _perlin_1d(self, length: int, scale: float, seed_offset: int = 0) -> np.ndarray:
+        """Generate 1D Perlin-like noise using simple value noise with smoothing."""
+        # Generate base noise using hash
+        noise = np.zeros(length)
+        for i in range(length):
+            # Simple hash-based noise
+            val = self.rng.uniform(-1.0, 1.0)
+            noise[i] = val
+        # Smooth with moving average
+        smoothed = np.zeros(length)
+        for i in range(length):
+            if i == 0:
+                smoothed[i] = noise[i]
+            elif i == length - 1:
+                smoothed[i] = (noise[i-1] + noise[i]) * 0.5
+            else:
+                smoothed[i] = (noise[i-1] + noise[i] + noise[i+1]) / 3.0
+        return smoothed
+
     def _apply_ocean_border(self) -> None:
         border = self.ocean_border
         if border <= 0:
             return
         ocean = self._terrain_index["ocean"]
-        self.terrain[:border, :] = ocean
-        self.terrain[-border:, :] = ocean
-        self.terrain[:, :border] = ocean
-        self.terrain[:, -border:] = ocean
+        
+        # Generate wavy border widths for each side
+        variation = max(2, border)  # Larger variation for more organic look
+        
+        # Generate noise for each side using 1D perlin noise with different seeds
+        # Top border: wave along x
+        top_noise = self._perlin_1d(self.width, 0.03, 0) * variation + border
+        # Bottom border: wave along x (different seed)
+        bottom_noise = self._perlin_1d(self.width, 0.03, 1000) * variation + border
+        # Left border: wave along y
+        left_noise = self._perlin_1d(self.height, 0.03, 2000) * variation + border
+        # Right border: wave along y (different seed)
+        right_noise = self._perlin_1d(self.height, 0.05, 3000) * variation + border
+        
+        top_noise = np.clip(top_noise, border, border * 3).astype(int)
+        bottom_noise = np.clip(bottom_noise, border, border * 3).astype(int)
+        left_noise = np.clip(left_noise, border, border * 3).astype(int)
+        right_noise = np.clip(right_noise, border, border * 3).astype(int)
+        
+        # Top border
+        for x in range(self.width):
+            w = int(top_noise[x])
+            self.terrain[:w, x] = self._terrain_index["ocean"]
+        
+        # Bottom border
+        for x in range(self.width):
+            w = int(bottom_noise[x])
+            self.terrain[-w:, x] = self._terrain_index["ocean"]
+        
+        # Left border
+        for y in range(self.height):
+            w = int(left_noise[y])
+            self.terrain[y, :w] = self._terrain_index["ocean"]
+        
+        # Right border
+        for y in range(self.height):
+            w = int(right_noise[y])
+            self.terrain[y, -w:] = self._terrain_index["ocean"]
 
     def refresh_terrain_properties(self) -> None:
         """Re-derive per-cell capacity/regen/passability from the current terrain and config."""
@@ -342,13 +399,53 @@ class Environment:
     def _snapshot_resources(self) -> None:
         self._post_regen = self.resources.copy()
 
-    def step(self, occupied: np.ndarray | None = None) -> None:
+    def step(self, occupied: np.ndarray | None = None, wind_dir: float = 0.0, wind_intensity: float = 0.0) -> None:
         if occupied is not None and occupied.shape == self.occupied.shape:
             self.occupied = occupied
         self._update_depletion_signal()
         self._regenerate()
         self._diffuse()
+        self._update_scent(wind_dir, wind_intensity)
         self._snapshot_resources()
+
+    def _add_scent(self, y: int, x: int, amount: float) -> None:
+        """Add scent at a location. Called when prey moves through a cell."""
+        if 0 <= y < self.height and 0 <= x < self.width:
+            self.scent[y, x] = min(1.0, self.scent[y, x] + amount)
+
+    def _update_scent(self, wind_dir: float, wind_intensity: float, dt: float = 1.0) -> None:
+        """Update scent field: decay + advection (wind) + diffusion."""
+        # Decay: scent fades over time
+        self.scent *= 0.95  # 5% decay per step
+        
+        # Advection: wind pushes scent
+        if wind_intensity > 0.01:
+            wind_dx = float(np.cos(wind_dir)) * wind_intensity
+            wind_dy = float(np.sin(wind_dir)) * wind_intensity
+            
+            # Use simple upwind scheme for advection
+            advected = np.zeros_like(self.scent)
+            shift_y = int(round(wind_dy * 3))
+            shift_x = int(round(wind_dx * 3))
+            
+            if shift_y >= 0:
+                advected[shift_y:, :] = self.scent[:-shift_y if shift_y else None, :]
+            else:
+                advected[:shift_y] = self.scent[-shift_y:, :]
+            
+            if shift_x >= 0:
+                advected[:, shift_x:] = advected[:, :-shift_x if shift_x else None]
+            else:
+                advected[:, :shift_x] = advected[:, -shift_x:]
+            
+            # Blend advected scent with original
+            self.scent = 0.7 * self.scent + 0.3 * advected
+        
+        # Diffusion: spread scent to neighbors
+        laplacian = nd_convolve(self.scent, _LAPLACIAN_KERNEL * 0.1, mode="wrap")
+        self.scent += laplacian
+        
+        np.clip(self.scent, 0.0, 1.0, out=self.scent)
 
     def _regenerate(self) -> None:
         deficit = self.resource_capacity - self.resources
@@ -388,8 +485,23 @@ class Environment:
         rate = self.config.resource_diffusion_rate
         if rate <= 0:
             return
-        laplacian = nd_convolve(self.resources, _LAPLACIAN_KERNEL * rate, mode="wrap")
-        self.resources += laplacian
+        
+        # Diffuse only within the same terrain type to prevent
+        # resources from leaking across terrain boundaries (e.g., rock -> plains)
+        for terrain_idx in range(len(self.terrain_names)):
+            mask = (self.terrain == terrain_idx)
+            if not mask.any():
+                continue
+            
+            # Extract resources for this terrain type
+            masked_resources = np.where(mask, self.resources, 0.0)
+            
+            # Apply diffusion only within this terrain type
+            laplacian = nd_convolve(masked_resources, _LAPLACIAN_KERNEL * rate, mode="wrap")
+            
+            # Only apply diffusion where the terrain matches
+            self.resources += np.where(mask, laplacian, 0.0)
+        
         np.clip(self.resources, 0.0, self.resource_capacity, out=self.resources)
 
     def _update_depletion_signal(self) -> None:

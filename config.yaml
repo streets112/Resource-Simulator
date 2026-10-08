@@ -8,7 +8,7 @@ simulation:
   simulation_speed: 1.0
 
 environment:
-  ocean_border_width: 5
+  ocean_border_width: 10
   terrain_types:
     ocean:
       color: [30, 60, 180]
@@ -32,20 +32,16 @@ environment:
       resource_productivity: 0.0
     plains:
       color: [180, 200, 100]
-      resource_regen_rate: 1.5
+      resource_regen_rate: .6
       # Capacity is the ceiling on energy extractable per cell visit, because
       # consume_resource can only take what is there. Raising grazing_efficiency
       # cannot compensate: income per visit is min(intake, capacity), so once
       # capacity binds, efficiency stops mattering.
       #
-      # Measured grazer stability over 500 steps (3 seeds):
-      #   70/14 -> grazers 129-264, rabbits 16-105   sustained
-      #   50/10 -> grazers 22-22,    rabbits 5-6      collapse
-      #   35/8  -> grazers 30-40,    rabbits 1-21     collapse
-      # Below 70/14 the prey cannot earn enough per visit to cover metabolism
-      # plus movement, so the only remaining levers are metabolic cost,
-      # reproduction thresholds, or regen rate.
-      resource_capacity: 14
+      # Target: ~8-10 bites per cell at full grazing (54/step) before depletion.
+      # Plains capacity 240 -> ~9 bites at full grazing efficiency.
+      # Forest capacity 320 -> ~12 bites at full grazing (but with productivity 0.33).
+      resource_capacity: 110
       passable: true
       mobility_prey: 1.0
       mobility_predator: 1.0
@@ -54,14 +50,10 @@ environment:
       resource_productivity: 1.0
     forest:
       color: [60, 140, 60]
-      resource_regen_rate: 0.5
-      # Was 70, which forests never depleted from. Lower values measured:
-      # 35 collapses prey (grazers 259 -> 36, rabbits -> 14, monotone decline)
-      # because income per cell visit is capped by capacity. Regen blocking makes
-      # no difference at that capacity -- herds are tight enough (herd_radius 8,
-      # separation_radius 2) that threshold 1 and threshold 3 block the same
-      # cells. Capacity, not regen, is the binding constraint.
-      resource_capacity: 70
+      resource_regen_rate: 0.10
+      # Higher capacity but lower productivity (0.33) and slower regen.
+      # Capacity 320 -> ~12 bites at full grazing, but net intake ~36% due to productivity.
+      resource_capacity: 160
       passable: true
       mobility_prey: 0.6
       mobility_predator: 0.7
@@ -72,7 +64,7 @@ environment:
     rock: 0.10
     plains: 0.32
     forest: 0.62
-  resource_diffusion_rate: 0.1
+  resource_diffusion_rate: 0.01
   regen_base_factor: 0.025
   depletion_threshold: 0.6
   depletion_suppression: 2.2
@@ -100,7 +92,7 @@ grazer:
   gradient_weight_std: 0.2
   vision_radius: 5
   herd_radius: 8
-  separation_radius: 2
+  separation_radius: 1
   herd_follow_chance: 0.7
   cohesion_weight: 0.4
   alignment_weight: 0.3
@@ -118,11 +110,11 @@ grazer:
   # A grazer needs 450 net energy between an offspring (200) and reproduction
   # (650). At x1.5 a typical cell yielded +2.0/step -> 225 steps, so grazers
   # averaged ~300/1000 energy and never reached the threshold.
-  grazing_efficiency: 3.0
+  grazing_efficiency: 1
   graze_ratio_threshold: 0.5
-  # Strip a cell fully before leaving it; at 0.12 they abandoned 12% of the
-  # remaining food on every visit.
-  migrate_ratio_threshold: 0.06
+  # Leave the cell when ratio drops below 30% (depleted but not empty)
+  # so grazers move on to better cells instead of stripping to zero.
+  migrate_ratio_threshold: 0.3
   graze_energy_target: 1.0
   graze_resume_energy: 0.7
   wander_energy_threshold: 0.98
@@ -163,7 +155,8 @@ rabbit:
   moving_efficiency: 0.25
   grazing_efficiency: 4.0
   graze_ratio_threshold: 0.5
-  migrate_ratio_threshold: 0.12
+  # Leave cell when depleted to ~30% rather than stripping to 12%
+  migrate_ratio_threshold: 0.3
   graze_energy_target: 1.0
   graze_resume_energy: 0.7
   wander_energy_threshold: 0.95
@@ -175,9 +168,9 @@ rabbit:
 
 predator:
   initial_count: 30
-  max_energy: 800
-  energy_per_step: 6
-  energy_from_prey: 260
+  max_energy: 1800
+  energy_per_step: 4
+  energy_from_prey: 65
   reproduction_min_age: 70
   reproduction_min_energy: 200
   reproduction_energy_cost: 0.25
@@ -196,12 +189,17 @@ predator:
   investigate_steps: 12
   investigate_threshold: 0.02
   vision_boost_on_investigate: 1.5
-  movement_energy_cost: 0.6
+  movement_energy_cost: 0.1
   # Failed chases are what starved predators, not failed hunts: at 2.0 a
   # fruitless pursuit burned ~440 energy, over half a predator's body, while a
   # successful rabbit netted only ~70.
   chase_speed_multiplier: 1.2
-  chase_cost_multiplier: 1.4
+  chase_cost_multiplier: 1.1
+  # Satiety system: predators only hunt when energy drops below this fraction
+  # of max_energy. When satiated, they patrol toward high prey density areas.
+  hunt_energy_threshold: 0.4
+  # When satiated, patrol toward areas with highest prey concentration
+  patrol_toward_prey: true
 
 carcass:
   decay_rate: 0.98

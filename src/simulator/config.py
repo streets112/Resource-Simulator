@@ -128,6 +128,13 @@ class PredatorConfig:
     movement_energy_cost: float = 0.6
     chase_speed_multiplier: float = 1.2
     chase_cost_multiplier: float = 2.0
+    scent_radius: int = 20
+    patrol_vision_range: int = 15
+    patrol_speed: float = 0.5
+    max_pack_size: int = 15
+    split_push_distance: int = 8
+    hunt_energy_threshold: float = 0.4
+    patrol_toward_prey: bool = True
 
 
 @dataclass
