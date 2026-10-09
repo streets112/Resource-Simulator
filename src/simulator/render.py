@@ -210,6 +210,9 @@ class MainRenderer:
         self.paused = False
         self.brush_index = 0
         self.brush_size = 3
+        self._held_brush_keys: set[int] = set()
+        self._brush_hint: str | None = None
+        self._brush_hint_time: int = 0
         self.hover: tuple[int, int] | None = None
         # Animal selected with a left click; the camera tracks it
         # and its stats stay on screen until it dies or is
@@ -400,6 +403,9 @@ class MainRenderer:
             elif event.type == pygame.KEYDOWN:
                 if self._handle_key(event, sim):
                     return "quit"
+            elif event.type == pygame.KEYUP:
+                if self.creator_mode and pygame.K_1 <= event.key <= pygame.K_1 + len(self.BRUSHES) - 1:
+                    self._held_brush_keys.discard(event.key)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     self._handle_left_click(event, sim)
@@ -427,7 +433,13 @@ class MainRenderer:
                     self.camera_y -= dy
                     self._last_mouse = event.pos
                 if self.creator_mode and self.hover is not None:
-                    self._paint_at(*self.hover)
+                    if self._held_brush_keys:
+                        for key in sorted(self._held_brush_keys):
+                            idx = key - pygame.K_1
+                            if 0 <= idx < len(self.BRUSHES):
+                                self._paint_at(*self.hover, idx)
+                    else:
+                        self._paint_at(*self.hover)
                 self._place_chart()
                 self.dirty = True
         return None
@@ -503,10 +515,19 @@ class MainRenderer:
             self.dirty_world = True
         elif key == pygame.K_m:
             self.creator_mode = not self.creator_mode
+            self._held_brush_keys.clear()
         elif self.creator_mode and pygame.K_1 <= key <= pygame.K_1 + len(self.BRUSHES) - 1:
-            self.brush_index = key - pygame.K_1
+            self._held_brush_keys.add(key)
+            self._show_brush_hint(key - pygame.K_1)
         self.dirty = True
         return False
+
+    def _show_brush_hint(self, brush_idx: int) -> None:
+        """Show a brief hint with the brush name when a brush key is pressed."""
+        if 0 <= brush_idx < len(self.BRUSHES):
+            name = self.BRUSHES[brush_idx]
+            self._brush_hint = f"brush: {name}"
+            self._brush_hint_time = pygame.time.get_ticks()
 
     def _handle_left_click(self, event, sim: Simulation) -> None:
         cell = self._cell_at(*event.pos)
@@ -521,6 +542,11 @@ class MainRenderer:
                 sim.spawn_grazer_at(y, x)
             elif mods & pygame.KMOD_ALT:
                 sim.spawn_rabbit_at(y, x)
+            elif self._held_brush_keys:
+                for key in sorted(self._held_brush_keys):
+                    idx = key - pygame.K_1
+                    if 0 <= idx < len(self.BRUSHES):
+                        self._paint_at(y, x, idx)
             return
         # Outside creator mode a click selects the animal under
         # the cursor for follow mode; clicking bare ground
@@ -546,10 +572,12 @@ class MainRenderer:
         self.following = best
         self.dirty = True
 
-    def _paint_at(self, y: int, x: int) -> None:
+    def _paint_at(self, y: int, x: int, brush_idx: int | None = None) -> None:
         if self.sim is None or not (0 <= y < self.sim.map_height and 0 <= x < self.sim.map_width):
             return
-        terrain = self.BRUSHES[self.brush_index]
+        if brush_idx is None:
+            brush_idx = self.brush_index
+        terrain = self.BRUSHES[brush_idx]
         radius = self.brush_size
         height = self.sim.map_height
         width = self.sim.map_width
@@ -1485,6 +1513,14 @@ class MainRenderer:
         lines = self._hud_lines(sim, paused, stats)
         if not lines:
             return
+
+        # Brush hint (brief flash when a brush key is pressed)
+        if self._brush_hint and pygame.time.get_ticks() - self._brush_hint_time < 1500:
+            # Draw it as a temporary overlay at the top of the HUD area
+            hint_surface = self.font.render(self._brush_hint, True, (255, 255, 180))
+            hint_rect = hint_surface.get_rect()
+            hint_rect.midtop = (self.screen.get_width() // 2, self.SIDEBAR_MARGIN + 4)
+            self.screen.blit(hint_surface, hint_rect)
 
         line_height = 18
         padding = 8
