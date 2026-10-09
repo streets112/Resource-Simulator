@@ -62,9 +62,12 @@ Opens keyboard-driven menu with 4 categories:
 | **4** | Scrub brush (rabbit stronghold) |
 | **5** | Forest brush |
 | **+ / -** | Brush size 1-10 |
-| **Left drag** | Paint terrain |
+| **Left drag** | Paint terrain (hold 1-5 while dragging) |
+| **Press 1-5** | Show brush name hint |
 | **G + Left click** | Spawn grazer |
 | **P + Left click** | Spawn predator |
+| **Alt + Left click** | Spawn rabbit |
+| **Alt + Left click** | Spawn rabbit |
 
 ### Inspect (hover)
 | Action | Result |
@@ -74,6 +77,7 @@ Opens keyboard-driven menu with 4 categories:
 ### Follow Mode
 | Action | Result |
 |--------|--------|
+| **F** | Toggle Follow Mode |
 | Left click animal | Camera tracks it, white circle drawn around it, its live stats pinned in the inspect pane |
 | Left click bare ground | Stop following |
 | **Esc** | Stop following |
@@ -108,8 +112,10 @@ Each cell = **8×8 pixels** (configurable `cell_size`):
 **Terrain Colors:**
 - 🌊 **Ocean** (30,60,180) - Impassable border (5 cells wide)
 - 🟫 **Rock** (80,80,80) - Impassable, no resources
-- 🟨 **Plains** (180,200,100) - Fast regen, low capacity (30)
-- 🟩 **Forest** (60,140,60) - Slow regen, high capacity (150)
+- 🟨 **Plains** (180,200,100) - Fast regen, low capacity; grazers at home
+- 🟩 **Forest** (60,140,60) - Slow regen, high capacity, low visibility; rabbit cover
+- 🟢 **Meadow** (100,200,90) - Grazer stronghold: fast regen, +30% grazing surplus
+- 🟤 **Scrub** (120,125,65) - Rabbit stronghold: cover, +30% grazing surplus for rabbits
 
 **Resource Gradient (Perimeter):**
 - ⚫ Dark gray = Depleted (0%)
@@ -227,16 +233,14 @@ plt.plot(steps, predators, label='Predators')
 plt.legend(); plt.show()
 ```
 
-### 5. Inspect Individual Behaviors
-1. Press **I** (Inspect Mode)
-2. Hover mouse over cells → sets initial position
-3. **Arrow keys** → move inspection box 1 cell
-3. Yellow box shows 5×5 inspection region in world view
-4. Tooltip shows 5×5 grid + cell details
+### 5. Inspect Individual Behaviors (Hover)
+1. Hover mouse over any cell → cell terrain, resources and entities shown in inspect pane
+2. Press **I** to toggle Inspect Mode → yellow box shows 5×5 region, arrow keys move it
 
 ### 6. Follow Individual Entities
 1. Press **F** (Follow Mode)
-2. Click an entity → tracks it with live energy/age readout
+2. Click an entity → camera tracks it, white circle drawn, live stats (energy, age, state) pinned in inspect pane
+3. Click bare ground / **Esc** / middle-mouse pan → stop following
 
 ---
 

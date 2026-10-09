@@ -523,49 +523,80 @@ JSON export includes per-step:
 
 ## 9. Persistence & State
 
-### 9.1 Creator Mode State Persistence
-
-**As a scenario designer, I want creator mode brush settings to persist, so that I don't need to reconfigure when re-entering creator mode.**
-
+### 9.5 Follow Mode (F Key)
+ 
+**As a researcher, I want to track an individual entity with the camera and see its live stats, so that I can study individual behavior and life history.**
+ 
 **Acceptance Criteria:**
-- Brush type (1/2/3) remembered across toggle
-- Brush size remembered across toggle
-- State stored in Renderer instance
-
-### 9.2 Config Changes Applied Live
-
-**As an experimenter, I want all config changes to apply immediately without restart, so that I can iterate rapidly.**
-
+- F key toggles follow mode
+- Left-click an entity to select it for tracking
+- Camera centers on the entity and follows it as it moves
+- White circle drawn around the followed entity
+- Live stats pinned in inspect pane: species, ID, energy/max (%), age, position, behavior state, lineage ID, and trait multipliers
+- Click bare ground, press Esc, or middle-mouse pan to stop following
+- Follow auto-disables if the entity dies
+ 
+### 9.6 Creator Mode: Hold-to-Paint with Brush Hints
+ 
+**As a world builder, I want to hold a number key (1-5) while dragging to paint terrain, and see a brief brush name hint when I press a number key, so that I can paint precisely without memorizing brush numbers.**
+ 
 **Acceptance Criteria:**
-- Slider changes → immediate `setattr` on config objects
-- Simulation reads live config each step
-- Environment parameters (diffusion, terrain regen/capacity) update live
-- Entity parameters (energy costs, speeds, radii) update live
-- Only grid size requires reset (R key)
-
-### 9.3 Reset Simulation (R) Keeps Environment
-
-**As an experimenter, I want reset to preserve the current terrain and resources, so that I can test population dynamics on identical landscapes.**
-
+- In creator mode (M), press 1-5 to select brush: rock/plains/meadow/scrub/forest
+- Hold the number key while left-dragging to paint with that brush
+- Press a number key (1-5) to show a brief "brush: NAME" hint at top center (auto-hides after 1.5s)
+- Hold multiple number keys simultaneously to paint with multiple brushes at once
+- Held brush keys are cleared when exiting creator mode (M)
+- Help text in creator mode shows "1-5 brush  +/- size"
+ 
+### 9.7 On-Demand Entity Spawning in Creator Mode
+ 
+**As a scenario designer, I want to spawn all three entity types (grazers, rabbits, predators) on demand in creator mode, so that I can set up custom initial conditions.**
+ 
 **Acceptance Criteria:**
-- R key: `sim = Simulation(config)` with existing `sim.env`
-- New initial populations spawned
-- Terrain, resources, capacities unchanged
-- Statistics zeroed
-
-### 9.4 Reload Environment (E) Keeps Entities
-
-**As an experimenter, I want environment reload to preserve existing entities, so that I can observe how populations adapt to new landscapes.**
-
+- In creator mode: Ctrl + left click → spawn grazer at cell
+- In creator mode: Shift + left click → spawn predator at cell
+- In creator mode: Alt + left click → spawn rabbit at cell
+- Entities spawned with config-default energy and randomized traits
+- Spawned entities become new bloodline founders
+ 
+### 9.8 Species-Specific Terrain Productivity (Niche Partitioning)
+ 
+**As an ecologist, I want each prey species to have its own productivity multiplier per terrain type, so that grazers and rabbits naturally partition into different biomes (meadow vs. scrub) instead of competing everywhere.**
+ 
 **Acceptance Criteria:**
-- E key: creates new Environment, keeps `sim.grazers` and `sim.predators`
-- Entities retain position, energy, age, ID
-- New resources initialized on new terrain
-- Step count and statistics history preserved
-- Carcasses cleared (new environment)
-
+- Each terrain type defines `grazer_productivity` and `rabbit_productivity` multipliers (default 1.0 = legacy behavior)
+- Meadow: grazer 1.3, rabbit 0.5 (grazer stronghold)
+- Scrub: grazer 0.5, rabbit 1.3 (rabbit stronghold)
+- Plains: grazer 1.0, rabbit 0.75 (neutral grazer-leaning)
+- Forest: grazer 0.7, rabbit 1.1 (rabbit-leaning cover)
+- Prey foraging targets include a mild species-affinity bias so herds drift toward their preferred biome
+- Resource extraction in `Prey.eat()` uses the species-specific productivity to scale the banked surplus
+ 
+### 9.9 Lineage Bloodline Tracking
+ 
+**As an evolutionary biologist, I want each starting individual to have a unique bloodline ID that is inherited by offspring (with slight trait variation), so that I can track which founding individuals' descendants dominate the population over time.**
+ 
+**Acceptance Criteria:**
+- Each entity gets `lineage_id` at spawn: founders get unique IDs, offspring inherit parent's lineage_id
+- Offspring inherit parent's traits (`speed_factor`, `forage_factor`/`hunt_factor`) with slight mutation (±5%)
+- Lineage population counts tracked per timestep and exposed in `get_statistics()`
+- In follow/inspect panes, entity's lineage ID and trait multipliers are displayed
+- Population chart gains "Lineage Mode" (F6): shows top 8 lineages by current count as distinct colored curves with lineage ID labels
+- Export JSON includes top-10 lineages in `as_record()`
+ 
+### 9.10 Population Chart Lineage Mode
+ 
+**As a population analyst, I want to toggle a lineage mode in the population chart (F6) that shows the top lineages as colored curves, so that I can visually track which founding bloodlines are thriving or going extinct.**
+ 
+**Acceptance Criteria:**
+- F6 toggles lineage mode on/off
+- In lineage mode: top 8 lineages by current population shown as distinct colored curves
+- Each curve labeled with its lineage ID at the end
+- Curves update live as simulation runs
+- Title changes to "Lineages (top 8)" and peak value shown
+- Works in both GUI and headless export (lineage history included in stats)
 ---
-
+ 
 ## Summary
 
 This document covers **50+ user stories** across **9 feature areas**, representing the complete implemented functionality of the Resource Simulator as of the current codebase. Each story follows the format:

@@ -16,26 +16,30 @@ A 2D grid-based ecosystem simulator modeling resource-predator-prey dynamics wit
 - **Cell Size**: 8 pixels (configurable)
 
 ### Terrain Types
-
-| Terrain | Color (RGB) | Regen Rate | Capacity | Passable |
-|---------|-------------|------------|----------|----------|
-| Ocean   | (30, 60, 180) | 0.0        | 0        | No       |
-| Rock    | (80, 80, 80) | 0.0        | 0        | No       |
-| Plains  | (180, 200, 100) | 1.5      | 30       | Yes      |
-| Forest  | (60, 140, 60) | 0.5       | 150      | Yes      |
-
+ 
+| Terrain | Color (RGB) | Regen Rate | Capacity | Passable | Mobility (Prey/Pred) | Visibility (Prey/Pred) | Grazer Prod | Rabbit Prod |
+|---------|-------------|------------|----------|----------|----------------------|------------------------|-------------|-------------|
+| Ocean   | (30, 60, 180) | 0.0        | 0        | No       | 0.0/0.0              | 0.0/0.0                | 1.0         | 1.0         |
+| Rock    | (80, 80, 80) | 0.0        | 0        | Yes      | 0.5/0.3              | 1.0/1.0                | 1.0         | 1.0         |
+| Plains  | (180, 200, 100) | 0.6      | 110      | Yes      | 1.0/1.0              | 1.0/1.0                | 1.0         | 0.75        |
+| Forest  | (60, 140, 60) | 0.10       | 160      | Yes      | 0.6/0.7              | 0.4/0.6                | 0.7         | 1.1         |
+| Meadow  | (100, 200, 90) | 0.5      | 150      | Yes      | 1.0/1.0              | 1.0/1.0                | 1.3         | 0.5         |
+| Scrub   | (120, 125, 65) | 0.25     | 130      | Yes      | 0.8/0.9              | 0.7/0.8                | 0.5         | 1.3         |
+ 
 **Terrain Characteristics:**
-- **Plains**: Fast regeneration, low capacity - good for quick grazing but depletes fast
-- **Forest**: Slow regeneration, high capacity - sustains larger populations longer
-- **Rock**: No resources, impassable - forms mountain ridges with natural passes
-- **Ocean**: Border around map, completely impassable
+- **Plains**: Fast regeneration, low capacity — grazers at home, rabbits exposed
+- **Forest**: Slow regeneration, high capacity — cover favors rabbits
+- **Meadow**: Grazer stronghold — fast regen, high capacity, grazers +30% surplus
+- **Scrub**: Rabbit stronghold — cover with rich pickings for rabbits, poor for grazers
+- **Rock**: Slow passable terrain, no resources — forms mountain ridges
+- **Ocean**: Impassable border — 5 cells wide around the map
 
 ### Biome Generation (Procedural)
 Uses multi-octave Perlin noise with ridge noise for mountains:
-1. **Mountain Ridges**: Ridge noise (1 - |perlin|)² with directional bias creates long connected ridges
+1. **Mountain Ridges**: Ridge noise `(1 - |perlin|)²` with directional bias creates long connected ridges
 2. **Natural Passes**: Carved at thinnest points of large ridge systems (>200 cells) using distance transform
-3. **Forests**: Broad expansive patches biased toward mountain proximity (within 8 cells) with organic expansion
-4. **Plains**: Fill remaining areas between features
+3. **Lowland Allocation**: Non-mountain areas split among Forest, Meadow, Scrub, Plains via sequential quantile allocation on per-biome noise fields, honoring `terrain_distribution` weights
+4. **Organic Expansion**: Forests expand organically into adjacent ground (3 iterations)
 5. **Ocean Border**: 5-cell wide impassable border around the entire map
 
 ### Resource Dynamics
@@ -225,7 +229,7 @@ Each simulation cell renders as 4×4 subpixels (8×8 pixels total at cell_size=8
 
 | Quadrant | Shows |
 |----------|-------|
-| Top-Left | Terrain type (rock=gray, plains=yellow-green, forest=dark green) |
+| Top-Left | Terrain type (rock=gray, plains=yellow-green, meadow=bright green, scrub=olive, forest=dark green) |
 | Top-Right | Resource level (dark gray→bright green gradient) |
 | Bottom-Left | Predator presence (orange) / Carcass (red) |
 | Bottom-Right | Grazer presence (yellow) |
@@ -265,11 +269,17 @@ Keyboard-driven inspection:
 - **5×5 grid** displayed at top of tooltip, details at bottom
 - Yellow box rendered around 5×5 inspection region in world view
 - **I** again → Exit inspect mode
-
 ### Follow Mode (F)
-Click entity to track:
-- Circle drawn around entity
-- Side panel shows real-time stats: position, energy, age, species-specific params
+
+**As a researcher, I want to track individual entities with live stats, so that I can study individual life histories.**
+
+**Acceptance Criteria:**
+- F key toggles follow mode
+- Click entity to select: camera centers on it, white circle drawn around it, live stats pinned in inspect pane (position, energy/max, age, ID, species-specific params, lineage)
+- Click bare ground: stop following
+- Esc key: stop following
+- Middle-mouse pan: stop following
+- Auto-disables if entity dies
 
 ---
 
@@ -277,15 +287,16 @@ Click entity to track:
 Interactive world editing:
 | Control | Action |
 |---------|--------|
-| **1** | Rock brush (impassable, no resources) |
-| **2** | Plains brush (fast regen, low capacity) |
-| **3** | Forest brush (slow regen, high capacity) |
-| **+/-** | Brush size 1-10 (circular) |
-| **Left drag** | Paint terrain |
+| **1-5** | Select brush: rock/plains/meadow/scrub/forest (hold while dragging to paint) |
+| **Press 1-5** | Show brush name hint at top (auto-hides after 1.5s) |
+| **Hold 1-5 + drag** | Paint terrain with that brush |
+| **+ / -** | Brush size 1-10 (circular) |
 | **G + Left click** | Spawn grazer at cell |
 | **P + Left click** | Spawn predator at cell |
+| **Alt + Left click** | Spawn rabbit at cell |
+| **M** | Toggle creator mode (clears held brush keys) |
 
-Terrain properties (capacity, regen rate, passable) update automatically.
+Terrain properties (capacity, regen rate, passable, mobility, visibility, per-species productivity) update automatically.
 
 ---
 
