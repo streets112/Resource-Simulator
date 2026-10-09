@@ -74,6 +74,9 @@ class Entity:
 class Prey(Entity):
     """Shared prey mechanics. Grazers and rabbits differ only by config values."""
 
+    # Terrain affinity key: selects the per-species productivity
+    # override on the terrain being eaten.
+    species_key = "prey"
     gradient_weight: float = 0.7
     inherited_gradient_weight: float = 0.7
     vision_radius: int = 5
@@ -106,23 +109,31 @@ class Prey(Entity):
 
         productivity = getattr(env, "productivity", None)
         if productivity is not None:
-            share = productivity(y, x)
-            if share < 1.0:
+            share = productivity(y, x, self.species_key)
+            if share != 1.0:
                 surplus = gained - float(self.config.energy_per_step)
                 if surplus > 0.0:
-                    gained -= surplus * (1.0 - share)
-                    self.energy = max(0.0, self.energy - surplus * (1.0 - share))
+                    # Terrain productivity scales the banked surplus:
+                    # preferred ground pays a bonus, poor ground taxes
+                    # it. share < 1 is the original tax; share > 1
+                    # rewards the species that thrives here.
+                    adjustment = surplus * (share - 1.0)
+                    before = self.energy
+                    self.energy = min(
+                        self.max_energy, max(0.0, self.energy + adjustment)
+                    )
+                    gained += self.energy - before
         return gained
 
 
 @dataclass
 class Grazer(Prey):
-    pass
+    species_key = "grazer"
 
 
 @dataclass
 class Rabbit(Prey):
-    pass
+    species_key = "rabbit"
 
 
 @dataclass

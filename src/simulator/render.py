@@ -11,6 +11,7 @@ except Exception:  # pragma: no cover - any SDL/import failure must stay non-fat
     PYGAME_AVAILABLE = False
 
 from simulator.config import Config, VisualizationConfig
+from simulator.entities import Predator
 from simulator.simulation import Simulation
 
 
@@ -146,7 +147,7 @@ class MainRenderer:
     MIN_ZOOM = 0.25
     MAX_ZOOM = 4.0
     ZOOM_STEP = 1.15
-    BRUSHES = ("rock", "plains", "forest")
+    BRUSHES = ("rock", "plains", "meadow", "scrub", "forest")
 
     # The map occupies the left of the window; the right-hand sidebar holds the
     # population chart with the metrics beneath it. The map viewport is the full
@@ -210,6 +211,10 @@ class MainRenderer:
         self.brush_index = 0
         self.brush_size = 3
         self.hover: tuple[int, int] | None = None
+        # Animal selected with a left click; the camera tracks it
+        # and its stats stay on screen until it dies or is
+        # deselected (escape, or a pan).
+        self.following = None
         self._panning = False
         self._last_mouse = (0, 0)
 
@@ -401,6 +406,9 @@ class MainRenderer:
                 elif event.button == 2:
                     self._panning = True
                     self._last_mouse = event.pos
+                    # Grabbing the camera hands control back to
+                    # the user, so stop tracking the animal.
+                    self.following = None
                 elif event.button == 4:
                     self._zoom_at(*event.pos, self.ZOOM_STEP)
                     self.dirty = True
@@ -448,7 +456,10 @@ class MainRenderer:
         wants_minus = key in minus_keys
 
         if key == pygame.K_ESCAPE:
-            return True
+            if self.following is not None:
+                self.following = None
+            else:
+                return True
         if key == pygame.K_SPACE:
             self.paused = not self.paused
         elif key == pygame.K_r and not ctrl:
@@ -492,23 +503,46 @@ class MainRenderer:
             self.dirty_world = True
         elif key == pygame.K_m:
             self.creator_mode = not self.creator_mode
-        elif self.creator_mode and key in (pygame.K_1, pygame.K_2, pygame.K_3):
+        elif self.creator_mode and pygame.K_1 <= key <= pygame.K_1 + len(self.BRUSHES) - 1:
             self.brush_index = key - pygame.K_1
         self.dirty = True
         return False
 
     def _handle_left_click(self, event, sim: Simulation) -> None:
-        if not self.creator_mode:
-            return
         cell = self._cell_at(*event.pos)
         if cell is None:
             return
-        y, x = cell
-        mods = pygame.key.get_mods()
-        if mods & pygame.KMOD_SHIFT:
-            sim.spawn_predator_at(y, x)
-        elif mods & pygame.KMOD_CTRL:
-            sim.spawn_grazer_at(y, x)
+        if self.creator_mode:
+            y, x = cell
+            mods = pygame.key.get_mods()
+            if mods & pygame.KMOD_SHIFT:
+                sim.spawn_predator_at(y, x)
+            elif mods & pygame.KMOD_CTRL:
+                sim.spawn_grazer_at(y, x)
+            return
+        # Outside creator mode a click selects the animal under
+        # the cursor for follow mode; clicking bare ground
+        # deselects.
+        self._follow_at(*cell, event.pos)
+
+    def _follow_at(self, y: int, x: int, screen_pos) -> None:
+        """Follow the living animal nearest the click on this cell."""
+        sim = self.sim
+        if sim is None:
+            return
+        wx, wy = self._screen_to_world(*screen_pos)
+        best = None
+        best_gap = float("inf")
+        for animal in (*sim.predators, *sim.rabbits, *sim.grazers):
+            if not animal.alive:
+                continue
+            if int(animal.y) != y or int(animal.x) != x:
+                continue
+            gap = (animal.x - wx) ** 2 + (animal.y - wy) ** 2
+            if gap < best_gap:
+                best, best_gap = animal, gap
+        self.following = best
+        self.dirty = True
 
     def _paint_at(self, y: int, x: int) -> None:
         if self.sim is None or not (0 <= y < self.sim.map_height and 0 <= x < self.sim.map_width):
@@ -802,6 +836,7 @@ class MainRenderer:
         if self.screen is None:
             self.dirty = False
             return
+        self._update_follow(sim)
         self._update_rate_meters(sim)
 
         self.screen.fill((10, 10, 20))
@@ -820,6 +855,51 @@ class MainRenderer:
             self._draw_grid(sim)
         pygame.display.flip()
         self.dirty = False
+
+    def _update_follow(self, sim: Simulation) -> None:
+        """Keep the camera centred on the followed animal."""
+        if self.following is None:
+            return
+        if not self.following.alive:
+            self.following = None
+            return
+        self.camera_x = float(self.following.x)
+        self.camera_y = float(self.following.y)
+
+    def _draw_follow_marker(self, sim: Simulation) -> None:
+        """Ring the followed animal so it stays findable."""
+        screen = self.screen
+        if screen is None or self.following is None:
+            return
+        entity = self.following
+        if not entity.alive:
+            return
+        scale = self._cell_pixels()
+        sx = int((entity.x - self.camera_x) * scale + self.view_w * 0.5)
+        sy = int((entity.y - self.camera_y) * scale + self.view_h * 0.5)
+        radius = max(4, int(round(scale * 0.75)))
+        pygame.draw.circle(screen, (255, 255, 255), (sx, sy), radius, 2)
+
+    def _follow_lines(self) -> list[str]:
+        """Live stats for the followed animal, for the inspect pane."""
+        entity = self.following
+        if entity is None or not entity.alive:
+            return []
+        name = type(entity).__name__.lower()
+        lines = [
+            f"following {name} id {entity.id}",
+            f"  energy {entity.energy:.0f}/{entity.max_energy} "
+            f"({entity.energy_ratio * 100:.0f}%)",
+            f"  age {entity.age}  at ({int(entity.x)}, {int(entity.y)})",
+        ]
+        if isinstance(entity, Predator):
+            state = entity.behavior_state
+            if entity.eating_state != "moving":
+                state = entity.eating_state
+            lines.append(f"  state {state}")
+        else:
+            lines.append(f"  state {entity.foraging_state}")
+        return lines
 
     def _update_rate_meters(self, sim: Simulation) -> None:
         """EMA frame rate plus a windowed simulation step rate, both from real time."""
@@ -857,6 +937,7 @@ class MainRenderer:
         if self.show_scent:
             self._draw_scent_overlay(sim)
         self._draw_entity_markers(sim)
+        self._draw_follow_marker(sim)
 
     def _blit_world_layer(self) -> None:
         """Blit the cached terrain+resource layer, cropped to the viewport.
@@ -940,8 +1021,33 @@ class MainRenderer:
 
         if self.show_predators:
             predator_color = colors.get("predator", (255, 100, 0))
+            # A predator that has picked up a trail gets a blue outline;
+            # one that has spotted prey directly gets a yellow one, so
+            # the detection channel is readable at a glance.
+            scent_outline = colors.get("scent_outline", (120, 200, 255))
+            sight_outline = colors.get("sight_outline", (255, 255, 120))
             for predator in sim.predators:
-                blit(predator, predator_color)
+                sx = int((predator.x - cam_x) * scale + centre_x)
+                if sx < -half or sx > view_w:
+                    continue
+                sy = int((predator.y - cam_y) * scale + centre_y)
+                if sy < -half or sy > view_h:
+                    continue
+                draw_rect(screen, predator_color, (sx, sy, half, half))
+                state = predator.behavior_state
+                if state == "scent_tracking":
+                    outline = scent_outline
+                elif state in ("chasing", "pack_hunting"):
+                    outline = sight_outline
+                else:
+                    outline = None
+                if outline is not None:
+                    # Same floor size as carcass outlines so the ring
+                    # stays visible at fit-to-window zoom.
+                    size = max(3, half)
+                    ox = sx + half // 2 - size // 2
+                    oy = sy + half // 2 - size // 2
+                    draw_rect(screen, outline, (ox, oy, size, size), 1)
         if self.show_grazers:
             grazer_color = colors.get("grazer", (255, 255, 0))
             rabbit_color = colors.get("rabbit", (255, 0, 255))
@@ -1118,12 +1224,17 @@ class MainRenderer:
         self.screen.blit(pct_text, text_rect)
 
     def _inspect_pane_height(self) -> int:
-        if self.hover is None or self.sim is None:
+        if self.sim is None:
             return 0
+        follow_rows = len(self._follow_lines())
+        if self.hover is None:
+            if follow_rows == 0:
+                return 0
+            return 20 + follow_rows * 18 + 10
         y, x = self.hover
         info = self._get_cell_info(y, x)
         entity_count = sum(len(v) for v in info["entities"].values())
-        rows = 5 + entity_count
+        rows = 5 + entity_count + follow_rows
         return 20 + rows * 18 + 10
 
     def _draw_inspect_highlight(self, sim: Simulation) -> None:
@@ -1184,44 +1295,51 @@ class MainRenderer:
         return info
 
     def _draw_inspect_pane(self, sim: Simulation) -> None:
-        if self.hover is None or self.small_font is None:
+        if (self.hover is None and self.following is None) or self.small_font is None:
             return
-        y, x = self.hover
-        info = self._get_cell_info(y, x)
         margin = self.SIDEBAR_MARGIN
         sidebar = self._sidebar_rect()
         pane_x = sidebar.x + margin
         pane_y = margin + 44
         pane_w = sidebar.width - 2 * margin
         line_height = 16
-        lines = [
-            f"cell ({x}, {y})",
-            f"terrain: {info['terrain']}",
-            f"passable: {info['passable']}",
-            f"mob prey: {info['mobility_prey']:.2f}  pred: {info['mobility_predator']:.2f}",
-            f"resource: {info['resource']:.1f}/{info['capacity']:.1f} ({info['ratio']*100:.0f}%)",
-        ]
-        for kind, label in (("grazers", "grazer"), ("rabbits", "rabbit"), ("predators", "predator"), ("carcasses", "carcass")):
-            entities = info["entities"][kind]
-            if not entities:
-                continue
-            lines.append(f"{label}:")
-            for entity in entities:
-                if kind == "predators":
-                    state = entity.behavior_state
-                    if entity.eating_state != "moving":
-                        state = entity.eating_state
-                    lines.append(
-                        f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {state}"
-                    )
-                elif kind == "carcass":
-                    lines.append(
-                        f"  id {entity.id}  e {entity.energy:.1f}  age {entity.age}"
-                    )
-                else:
-                    lines.append(
-                        f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {entity.foraging_state}"
-                    )
+        lines: list[str] = []
+        # The followed animal's stats stay pinned to the top
+        # of the pane and refresh every frame.
+        lines.extend(self._follow_lines())
+        if self.hover is not None:
+            y, x = self.hover
+            info = self._get_cell_info(y, x)
+            lines.extend(
+                [
+                    f"cell ({x}, {y})",
+                    f"terrain: {info['terrain']}",
+                    f"passable: {info['passable']}",
+                    f"mob prey: {info['mobility_prey']:.2f}  pred: {info['mobility_predator']:.2f}",
+                    f"resource: {info['resource']:.1f}/{info['capacity']:.1f} ({info['ratio']*100:.0f}%)",
+                ]
+            )
+            for kind, label in (("grazers", "grazer"), ("rabbits", "rabbit"), ("predators", "predator"), ("carcasses", "carcass")):
+                entities = info["entities"][kind]
+                if not entities:
+                    continue
+                lines.append(f"{label}:")
+                for entity in entities:
+                    if kind == "predators":
+                        state = entity.behavior_state
+                        if entity.eating_state != "moving":
+                            state = entity.eating_state
+                        lines.append(
+                            f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {state}"
+                        )
+                    elif kind == "carcasses":
+                        lines.append(
+                            f"  id {entity.id}  e {entity.energy:.1f}  age {entity.age}"
+                        )
+                    else:
+                        lines.append(
+                            f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {entity.foraging_state}"
+                        )
         pane_h = 8 + len(lines) * line_height + 6
         overlay = pygame.Surface((pane_w, pane_h), pygame.SRCALPHA)
         overlay.fill((0, 0, 0, 185))
@@ -1242,7 +1360,7 @@ class MainRenderer:
             ((tuple(colors.get("carcass", (255, 0, 0)))), "carcasses", str(stats["carcasses"])),
         ]
         # Terrain swatches read from the same source the world layer uses.
-        for name, key in (("rock", "rock"), ("plains", "plains"), ("forest", "forest")):
+        for name in ("rock", "plains", "meadow", "scrub", "forest"):
             terrain_cfg = self.config.environment.terrain_types.get(name)
             if terrain_cfg is not None:
                 rows.append((tuple(terrain_cfg.color), f"{name}", ""))
@@ -1335,7 +1453,7 @@ class MainRenderer:
             lines += [
                 "[CREATOR MODE]",
                 f"brush {self.BRUSHES[self.brush_index]}  size {self.brush_size}",
-                "1/2/3 brush  +/- size",
+                "1-5 brush  +/- size",
                 "ctrl+click grazer",
                 "shift+click predator",
                 "m to exit",
@@ -1347,6 +1465,8 @@ class MainRenderer:
                 "m  creator",
                 "f1-f4  layers",
                 "f5  chart    0  fit",
+                "click animal: follow",
+                "esc  stop follow",
             ]
         return lines
 

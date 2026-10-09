@@ -62,9 +62,28 @@ def test_ocean_border_is_impassable_and_empty(config):
 
 def test_terrain_generation_uses_all_types(config):
     env = Environment(config.environment, 80, 80, seed=5)
-    assert set(env.terrain_names) == {"ocean", "rock", "plains", "forest"}
+    assert set(env.terrain_names) == {
+        "ocean", "rock", "plains", "forest", "meadow", "scrub",
+    }
     # Rock must not be a solid mass; passable interior must exist.
     assert env.passable[env.terrain == env._terrain_index["forest"]].any()
+
+
+def test_biome_generation_produces_every_biome(config):
+    env = Environment(config.environment, 200, 150, seed=5)
+    present = {env.terrain_names[i] for i in np.unique(env.terrain)}
+    assert {"forest", "meadow", "scrub", "plains"} <= present
+
+
+def test_terrain_productivity_is_species_specific(config):
+    """Meadow favours grazers, scrub favours rabbits; unknown species fall back."""
+    env = Environment(config.environment, 40, 40, seed=1)
+    env.set_terrain(20, 20, "meadow")
+    env.set_terrain(20, 21, "scrub")
+    assert env.productivity(20, 20, "grazer") > env.productivity(20, 20, "rabbit")
+    assert env.productivity(20, 21, "rabbit") > env.productivity(20, 21, "grazer")
+    shared = config.environment.terrain_types["meadow"].resource_productivity
+    assert env.productivity(20, 20, "") == shared
 
 
 def test_regeneration_slows_but_never_stops(config):

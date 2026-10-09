@@ -48,22 +48,57 @@ environment:
       visibility_prey: 1.0
       visibility_predator: 1.0
       resource_productivity: 1.0
+      # Open ground: grazers are at home, rabbits are exposed.
+      grazer_productivity: 1.0
+      rabbit_productivity: 0.75
     forest:
       color: [60, 140, 60]
       resource_regen_rate: 0.10
-      # Higher capacity but lower productivity (0.33) and slower regen.
-      # Capacity 320 -> ~12 bites at full grazing, but net intake ~36% due to productivity.
+      # Higher capacity but slower regen. Cover favours rabbits: they bank
+      # their surplus here while grazers get a smaller share.
       resource_capacity: 160
       passable: true
       mobility_prey: 0.6
       mobility_predator: 0.7
       visibility_prey: 0.4
       visibility_predator: 0.6
-      resource_productivity: 0.333
+      resource_productivity: 1.0
+      grazer_productivity: 0.7
+      rabbit_productivity: 1.1
+    meadow:
+      color: [100, 200, 90]
+      # Grazer stronghold: lush, fast-regrowing pasture where grazers
+      # extract a third more energy than on plains.
+      resource_regen_rate: 0.5
+      resource_capacity: 150
+      passable: true
+      mobility_prey: 1.0
+      mobility_predator: 1.0
+      visibility_prey: 1.0
+      visibility_predator: 1.0
+      resource_productivity: 1.0
+      grazer_productivity: 1.3
+      rabbit_productivity: 0.5
+    scrub:
+      color: [120, 125, 65]
+      # Rabbit stronghold: dense cover with rich pickings for rabbits,
+      # but slow going and poor grazing for grazers.
+      resource_regen_rate: 0.25
+      resource_capacity: 130
+      passable: true
+      mobility_prey: 0.8
+      mobility_predator: 0.9
+      visibility_prey: 0.7
+      visibility_predator: 0.8
+      resource_productivity: 1.0
+      grazer_productivity: 0.5
+      rabbit_productivity: 1.3
   terrain_distribution:
     rock: 0.10
-    plains: 0.32
-    forest: 0.62
+    plains: 0.22
+    forest: 0.38
+    meadow: 0.22
+    scrub: 0.18
   resource_diffusion_rate: 0.01
   regen_base_factor: 0.025
   depletion_threshold: 0.6
@@ -90,9 +125,9 @@ grazer:
   move_speed: 1
   gradient_weight: 0.7
   gradient_weight_std: 0.2
-  vision_radius: 5
-  herd_radius: 8
-  separation_radius: 1
+  vision_radius: 10
+  herd_radius: 5
+  separation_radius: 0.5
   herd_follow_chance: 0.7
   cohesion_weight: 0.4
   alignment_weight: 0.3
@@ -101,7 +136,7 @@ grazer:
   flee_weight: 3.0
   min_efficiency: 0.3
   spawn_group_size: 14
-  spawn_group_radius: 6
+  spawn_group_radius: 2
   # Grazers travel to fresh ground and stop to feed, like rabbits but with a
   # longer stride and a higher travel tolerance. Travel peak is
   # 18 * 0.25 = 4.5 < 5, so a journey always costs energy.
@@ -131,20 +166,26 @@ rabbit:
   # rabbits never need to stop. Travelling yield peaks at
   # energy_from_resource * moving_efficiency = 6 * 0.25 = 1.5 < 5.
   energy_per_step: 5
+  # Rabbits are scrub specialists: their grazing_efficiency (4.0) is
+  # high, so energy_from_resource stays modest. In scrub the
+  # productivity bonus (1.3) lifts the effective intake to
+  # 6 * 4.0 * 1.3 = 31/step on full ground; on plains (0.75) the
+  # same bite is taxed down to 18, which is what keeps them out of
+  # grazer country.
   energy_from_resource: 6
   reproduction_min_age: 60
-  reproduction_min_energy: 300
-  reproduction_energy_cost: 0.35
+  reproduction_min_energy: 200
+  reproduction_energy_cost: 0.60
   offspring_initial_energy: 120
-  move_speed: 1
+  move_speed: 2
   gradient_weight: 0.9
   gradient_weight_std: 0.1
   vision_radius: 4
   herd_radius: 8
   separation_radius: 2
   herd_follow_chance: 0.85
-  cohesion_weight: 0.6
-  alignment_weight: 0.3
+  cohesion_weight: .8
+  alignment_weight: 0.6
   separation_weight: 0.35
   flee_radius: 5
   flee_weight: 3.0
@@ -168,11 +209,11 @@ rabbit:
 
 predator:
   initial_count: 30
-  max_energy: 1800
+  max_energy: 800
   energy_per_step: 4
   # Reduced from 65 to make predators less voracious - they now get less energy per kill
   # which forces them to hunt more selectively and prevents overconsumption
-  energy_from_prey: 35
+  energy_from_prey: 100
   # Increased from 70 to slow reproduction - predators take longer to reach maturity
   reproduction_min_age: 120
   # Increased from 200 to require more energy reserves before reproducing
@@ -181,7 +222,7 @@ predator:
   reproduction_energy_cost: 0.4
   # Reduced from 160 to give offspring a harder start
   offspring_initial_energy: 100
-  move_speed: 2
+  move_speed: 1
   chase_radius: 7
   resource_sense_radius: 10
   spawn_group_size: 6
@@ -199,7 +240,12 @@ predator:
   # Failed chases are what starved predators, not failed hunts: at 2.0 a
   # fruitless pursuit burned ~440 energy, over half a predator's body, while a
   # successful rabbit netted only ~70.
-  chase_speed_multiplier: 1.2
+  # Chase speed is move_speed * chase_speed_multiplier. Grazers flee at
+  # 1 * 1.3 = 1.3 cells/step, so a chase multiplier of 1.4 keeps the
+  # predator's top speed at ~1.1x the prey's flee speed: it can run
+  # down a feeding grazer but not one that is already fleeing, which
+  # is what lets prey populations recover instead of being harvested.
+  chase_speed_multiplier: 1.4
   chase_cost_multiplier: 1.1
   # Satiety system: predators only hunt when energy drops below this fraction
   # of max_energy. When satiated, they patrol toward high prey density areas.
@@ -220,14 +266,16 @@ carcass:
   min_energy: 1.0
   carcass_energy_fraction: 1.0
   # Lower divisor means a carcass is drained in fewer steps, so a kill is cashed
-  # in at roughly half the metabolic burn of sitting on it.
+  # in at roughly half the metabolic burn of sitting on it. The drain rate
+  # (energy_from_prey / divisor) must exceed predator metabolism (4/step) or
+  # scavenging is net-negative and predators slowly starve.
   consumption_divisor: 4.0
   feed_radius: 1
 
 visualization:
   cell_size: 8
   show_grid: true
-  show_stats: true
+  show_stats: false
   fps: 60
   window_width: 1404
   window_height: 768
@@ -237,6 +285,10 @@ visualization:
     carcass: [255, 0, 0]
     rabbit: [255, 0, 255]
     carcass_outline: [255, 220, 220]
+    # Predator detection outlines: blue = following a scent trail,
+    # yellow = chasing prey it has spotted by sight.
+    scent_outline: [120, 200, 255]
+    sight_outline: [255, 255, 120]
     resource_low: [30, 30, 30]
     resource_high: [50, 255, 50]
 

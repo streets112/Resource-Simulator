@@ -58,24 +58,26 @@ Opens keyboard-driven menu with 4 categories:
 |-----|--------|
 | **1** | Rock brush |
 | **2** | Plains brush |
-| **3** | Forest brush |
+| **3** | Meadow brush (grazer stronghold) |
+| **4** | Scrub brush (rabbit stronghold) |
+| **5** | Forest brush |
 | **+ / -** | Brush size 1-10 |
 | **Left drag** | Paint terrain |
 | **G + Left click** | Spawn grazer |
 | **P + Left click** | Spawn predator |
 
-### In Inspect Mode (I)
-| Key | Action |
-|-----|--------|
-| **I** | Toggle inspect mode |
-| **←/→/↑/↓** | Move inspection box 1 cell |
-| **I** (again) | Exit inspect mode |
-| Hover mouse | Sets initial position when entering |
-
-### In Follow Mode (F)
+### Inspect (hover)
 | Action | Result |
 |--------|--------|
-| Left click entity | Tracks entity with circle + stats panel |
+| Hover mouse | Cell terrain, resources and entities in the inspect pane |
+
+### Follow Mode
+| Action | Result |
+|--------|--------|
+| Left click animal | Camera tracks it, white circle drawn around it, its live stats pinned in the inspect pane |
+| Left click bare ground | Stop following |
+| **Esc** | Stop following |
+| Middle-mouse pan | Stop following |
 
 ### Zoom / Pan
 | Action | Control |

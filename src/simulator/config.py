@@ -28,6 +28,11 @@ class TerrainConfig:
     visibility_predator: float = 1.0
     # Fraction of the post-metabolism surplus a prey actually banks here.
     resource_productivity: float = 1.0
+    # Species-specific overrides. None means "fall back to
+    # resource_productivity", so configs that only set the shared value
+    # keep working unchanged.
+    grazer_productivity: float | None = None
+    rabbit_productivity: float | None = None
 
 
 @dataclass
@@ -198,6 +203,13 @@ def load_config(path: str | Path = "config.yaml") -> Config:
         name: _build(TerrainConfig, body)
         for name, body in env_raw.get("terrain_types", {}).items()
     }
+    # Per-species productivity falls back to the shared value when a
+    # terrain does not override it.
+    for terrain_cfg in terrains.values():
+        if terrain_cfg.grazer_productivity is None:
+            terrain_cfg.grazer_productivity = terrain_cfg.resource_productivity
+        if terrain_cfg.rabbit_productivity is None:
+            terrain_cfg.rabbit_productivity = terrain_cfg.resource_productivity
     env = _build(
         EnvironmentConfig,
         {

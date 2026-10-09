@@ -63,46 +63,70 @@ class Environment:
         base_noise = self._fractal(octaves=5, persistence=0.5, scale=0.015)
         ridge_noise = self._ridge(octaves=4, persistence=0.5, scale=0.05)
         forest_noise = self._fractal(octaves=4, persistence=0.6, scale=0.01)
+        meadow_noise = self._fractal(octaves=4, persistence=0.55, scale=0.02)
+        scrub_noise = self._fractal(octaves=4, persistence=0.5, scale=0.035)
 
-        # Pure ridged noise. Any smooth low-frequency term blended in here (such
-        # as the directional bias) lifts broad areas over the crest threshold and
-        # fattens ridges into slabs, so the mask is taken from the ridge field
-        # alone.
         mountain_mask = self._build_ridges(ridge_noise)
 
-        # Forest and plains split whatever the ridges leave behind, honouring
-        # terrain_distribution instead of whatever the noise happened to give.
+        # Biomes are allocated sequentially: each takes its share of the
+        # lowland, scored by its own noise field, and whatever is left
+        # becomes plains. Forests expand organically into adjacent ground,
+        # so their mask is finalised before the next biome claims cells.
         distribution = self.config.terrain_distribution
         remaining = ~mountain_mask
         remaining_cells = int(remaining.sum())
-        target_forest = float(distribution.get("forest", 0.55))
-        target_plains = float(distribution.get("plains", 0.30))
-        weight_sum = target_forest + target_plains
 
-        if remaining_cells == 0 or weight_sum <= 0:
-            forest_mask = remaining
-        else:
-            share = min(1.0, target_forest / weight_sum)
-            wanted = int(round(remaining_cells * share))
-            mountain_distance = distance_transform_edt(~mountain_mask)
-            mountain_proximity = 1.0 - np.clip(mountain_distance / 8.0, 0.0, 1.0)
-            forest_score = _normalize(
-                forest_noise * 0.5 + (1.0 - base_noise) * 0.3 + mountain_proximity * 0.2
+        mountain_distance = distance_transform_edt(~mountain_mask)
+        mountain_proximity = 1.0 - np.clip(mountain_distance / 8.0, 0.0, 1.0)
+
+        biome_plan = tuple(
+            (name, noise, expands)
+            for name, noise, expands in (
+                ("forest", forest_noise, True),
+                ("meadow", meadow_noise, False),
+                ("scrub", scrub_noise, False),
             )
-            if wanted <= 0:
-                forest_mask = np.zeros_like(remaining)
-            elif wanted >= remaining_cells:
-                forest_mask = remaining.copy()
-            else:
-                cutoff = np.quantile(forest_score[remaining], 1.0 - wanted / remaining_cells)
-                forest_mask = remaining & (forest_score >= cutoff)
-                forest_mask = self._expand_forests(forest_mask, ~mountain_mask)
+            if name in self._terrain_index
+        )
+        weights = {name: float(distribution.get(name, 0.0)) for name, _, _ in biome_plan}
+        plains_weight = float(distribution.get("plains", 0.0))
+        weight_sum = sum(weights.values()) + plains_weight
 
-        plains_mask = remaining & ~forest_mask
+        masks = {name: np.zeros_like(remaining) for name, _, _ in biome_plan}
+        if remaining_cells > 0 and weight_sum > 0:
+            available = remaining.copy()
+            available_cells = remaining_cells
+            for name, noise, expands in biome_plan:
+                wanted = int(round(remaining_cells * weights[name] / weight_sum))
+                wanted = min(wanted, available_cells)
+                if weights[name] <= 0 or wanted <= 0:
+                    continue
+                score = _normalize(
+                    noise * 0.5 + (1.0 - base_noise) * 0.3 + mountain_proximity * 0.2
+                )
+                cutoff = np.quantile(score[available], 1.0 - wanted / available_cells)
+                mask = available & (score >= cutoff)
+                if expands:
+                    mask = self._expand_forests(mask, ~mountain_mask)
+                masks[name] = mask
+                available &= ~mask
+                available_cells = int(available.sum())
+        elif remaining_cells > 0:
+            # Degenerate distribution: no weights at all, everything forest.
+            if "forest" in self._terrain_index:
+                masks["forest"] = remaining.copy()
 
-        self.terrain[mountain_mask] = self._terrain_index["rock"]
-        self.terrain[forest_mask] = self._terrain_index["forest"]
-        self.terrain[plains_mask] = self._terrain_index["plains"]
+        def _paint(mask, name):
+            if name in self._terrain_index:
+                self.terrain[mask] = self._terrain_index[name]
+
+        _paint(mountain_mask, "rock")
+        for name, _, _ in biome_plan:
+            _paint(masks[name], name)
+        plains_mask = remaining & ~mountain_mask
+        for name, _, _ in biome_plan:
+            plains_mask &= ~masks[name]
+        _paint(plains_mask, "plains")
 
         self.terrain = self._smooth_terrain(self.terrain, names, iterations=1)
         self._carve_mountain_passes(mountain_mask)
@@ -567,9 +591,20 @@ class Environment:
         terrain = self.config.terrain_types[self.get_terrain_at(y, x)]
         return terrain.mobility_predator if predator else terrain.mobility_prey
 
-    def productivity(self, y: int, x: int) -> float:
-        """How much of a prey's post-metabolism surplus this terrain lets it bank."""
-        return self.config.terrain_types[self.get_terrain_at(y, x)].resource_productivity
+    def productivity(self, y: int, x: int, species: str = "") -> float:
+        """How much of a prey's post-metabolism surplus this terrain lets it bank.
+
+        Species-specific overrides let a terrain favour one prey over
+        another, which is what gives each species its own niche.
+        """
+        terrain = self.config.terrain_types[self.get_terrain_at(y, x)]
+        value = {
+            "grazer": terrain.grazer_productivity,
+            "rabbit": terrain.rabbit_productivity,
+        }.get(species)
+        if value is None:
+            value = terrain.resource_productivity
+        return value
 
     def visibility(self, y: int, x: int, predator: bool) -> float:
         terrain = self.config.terrain_types[self.get_terrain_at(y, x)]

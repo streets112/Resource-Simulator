@@ -15,6 +15,12 @@ def _sign(value: float) -> int:
     return 0
 
 
+# Weight of the terrain-affinity bonus in forage targeting. Mild on
+# purpose: a depleted preferred biome must still lose to rich neutral
+# ground, or species would camp on stripped earth.
+BIOME_AFFINITY_WEIGHT = 0.6
+
+
 class _SpatialIndex:
     """Cell-bucketed neighbour lookup, so perception is O(n * radius^2) not O(n^2).
 
@@ -186,39 +192,84 @@ class Simulation:
             self._wind_intensity + self.rng.normal(0, 0.08), 0.1, 1.0
         ))
         
+    def _scent_windows(
+        self, py: int, px: int, radius: int
+    ) -> list[tuple[int, int, int, int]]:
+        """Query windows covering the scent disc, wrapping at the seams.
+
+        The spatial index is a plain cell bucket map, so a predator
+        near an edge must also query the window that wraps around to
+        the far side, or prey just across the seam would be invisible.
+        """
+        windows: list[tuple[int, int, int, int]] = []
+        for y_base in (py - radius, py - radius + self.map_height):
+            y0 = max(0, y_base)
+            y1 = min(self.map_height - 1, y_base + 2 * radius)
+            if y0 > y1:
+                continue
+            for x_base in (px - radius, px - radius + self.map_width):
+                x0 = max(0, x_base)
+                x1 = min(self.map_width - 1, x_base + 2 * radius)
+                if x0 > x1:
+                    continue
+                windows.append((y0, y1, x0, x1))
+        return windows
+
     def _scent_gradient(self, predator: Predator) -> tuple[float, float] | None:
         """Return (dy, dx) scent gradient for the predator, or None.
-        
-        Scent flows downwind from prey positions. Predators use gradient descent
-        to follow the strongest scent concentration.
+
+        Scent flows downwind from prey positions, so a prey is
+        smelled strongest upwind of it. Each prey contributes a
+        pull toward itself, weighted by proximity and by how far
+        upwind it sits, and the gradient is their weighted sum.
         """
         py, px = int(predator.y), int(predator.x)
         radius = self.config.predator.scent_radius
-        y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
-        x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
-        
-        # Scent strength from prey in the neighbourhood, weighted by distance
-        # and carried downwind.
+
+        # Scent strength from prey in the neighbourhood, weighted by
+        # distance and carried downwind.
         wind_x = float(np.cos(self._wind_dir)) * self._wind_intensity
         wind_y = float(np.sin(self._wind_dir)) * self._wind_intensity
-        
+
         grad_y = grad_x = 0.0
         found = False
-        for prey in self._prey_index.query(y0, y1 - 1, x0, x1 - 1):
-            if not prey.alive:
-                continue
-            ty, tx = int(prey.y), int(prey.x)
-            dy = ty - py
-            dx = tx - px
-            dist = max(1, self.distance(py, px, ty, tx))
-            # Scent is stronger closer and further UPWIND (scent flows downwind FROM prey)
-            # wind_x * dx + wind_y * dy is positive when prey is downwind of predator
-            # We want higher strength when prey is UPWIND (negative dot product)
-            strength = (1.0 / dist) * (1.0 - wind_x * dx - wind_y * dy)
-            grad_y += (ty - py) * strength / dist
-            grad_x += (tx - px) * strength / dist
-            found = True
-        
+        for y0, y1, x0, x1 in self._scent_windows(py, px, radius):
+            for prey in self._prey_index.query(y0, y1, x0, x1):
+                if not prey.alive:
+                    continue
+                ty, tx = int(prey.y), int(prey.x)
+                # Direction to the prey, wrapped so a prey just
+                # across the toroidal seam pulls the right way
+                # instead of dragging the predator to the
+                # opposite edge.
+                dy = ty - py
+                if dy > self.map_height // 2:
+                    dy -= self.map_height
+                elif dy < -self.map_height // 2:
+                    dy += self.map_height
+                dx = tx - px
+                if dx > self.map_width // 2:
+                    dx -= self.map_width
+                elif dx < -self.map_width // 2:
+                    dx += self.map_width
+                dist = max(1, self.distance(py, px, ty, tx))
+                if dist > radius:
+                    continue
+                # Scent rides the wind: a prey is smelled
+                # strongest upwind of it (scent flows downwind
+                # FROM the prey). Normalising the dot product
+                # keeps the wind boost in [0, 2], so the
+                # weight stays positive and the gradient always
+                # pulls toward the prey rather than reversing
+                # and running off the map.
+                downwind = (wind_x * dx + wind_y * dy) / max(
+                    1.0, math.hypot(dx, dy)
+                )
+                strength = (1.0 - downwind) / dist
+                grad_y += (dy / dist) * strength
+                grad_x += (dx / dist) * strength
+                found = True
+
         if not found:
             return None
         return (grad_y, grad_x)
@@ -581,11 +632,19 @@ class Simulation:
         radius = max(1, int(prey.vision))
         y0, y1 = max(0, py - radius), min(self.map_height, py + radius + 1)
         x0, x1 = max(0, px - radius), min(self.map_width, px + radius + 1)
-        
+
         window = self._ratios[y0:y1, x0:x1]
         reachable = self.env.passable[y0:y1, x0:x1]
         score = np.where(reachable, window, -np.inf)
-        
+
+        # Species affinity: ground where this prey extracts more energy
+        # scores higher, so grazers drift toward meadows and rabbits
+        # toward scrub instead of both species competing on the same
+        # cells. The bias is small enough that resource availability
+        # still dominates.
+        affinity = self._species_affinity(prey.species_key, y0, y1, x0, x1)
+        score = score + np.where(reachable, affinity, 0.0)
+
         # Well-fed prey can afford to prospect away from rich ground, but a
         # migratory species is looking for food, so prospecting is counterproductive.
         if prey.energy_ratio > 0.8 and not cfg.migratory:
@@ -600,6 +659,21 @@ class Simulation:
         if not np.isfinite(score.flat[best]):
             return py, px
         return y0 + best // score.shape[1], x0 + best % score.shape[1]
+
+    def _species_affinity(
+        self, species: str, y0: int, y1: int, x0: int, x1: int
+    ) -> np.ndarray:
+        """Per-cell foraging bonus from terrain the species thrives in."""
+        terrains = self.config.environment.terrain_types
+        lut = np.zeros(len(self.env.terrain_names))
+        for i, name in enumerate(self.env.terrain_names):
+            terrain_cfg = terrains.get(name)
+            if terrain_cfg is None:
+                continue
+            value = getattr(terrain_cfg, f"{species}_productivity", None)
+            if value is not None:
+                lut[i] = (float(value) - 1.0) * BIOME_AFFINITY_WEIGHT
+        return lut[self.env.terrain[y0:y1, x0:x1]]
         
     def _threat_vector(self, prey, radius: int) -> tuple[float, float] | None:
         """Weighted escape direction away from predators inside flee_radius."""
@@ -875,12 +949,20 @@ class Simulation:
             # Priority 2: Follow scent gradient downwind
             scent = self._scent_gradient(predator)
             if scent is not None:
-                predator.behavior_state = "scent_tracking"
-                ty = int(predator.y + scent[0] * 5)
-                tx = int(predator.x + scent[1] * 5)
-                ty, tx = self.env.clamp(ty, tx)
-                self._move_predator_toward(predator, ty, tx)
-                return
+                # The gradient's magnitude falls off with
+                # distance, so normalise it and walk a fixed
+                # look-ahead toward the smelled prey. That
+                # keeps scent a usable long-range sense
+                # instead of a nudge that rounds to nothing.
+                magnitude = math.hypot(scent[0], scent[1])
+                if magnitude > 0.0:
+                    predator.behavior_state = "scent_tracking"
+                    look_ahead = float(min(cfg.scent_radius, 8))
+                    ty = int(predator.y + scent[0] / magnitude * look_ahead)
+                    tx = int(predator.x + scent[1] / magnitude * look_ahead)
+                    ty, tx = self.env.clamp(ty, tx)
+                    self._move_predator_toward(predator, ty, tx)
+                    return
         
         
         # Priority 3 (satiated) or 4 (hungry but no scent/resource): Patrol toward high prey density
