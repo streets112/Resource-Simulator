@@ -438,8 +438,6 @@ class MainRenderer:
                             idx = key - pygame.K_1
                             if 0 <= idx < len(self.BRUSHES):
                                 self._paint_at(*self.hover, idx)
-                    else:
-                        self._paint_at(*self.hover)
                 self._place_chart()
                 self.dirty = True
         return None
