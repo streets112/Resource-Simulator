@@ -436,6 +436,12 @@ class Simulation:
             return None
         self._add_predator(y, x)
         return self.predators[-1]
+
+    def spawn_rabbit_at(self, y: int, x: int) -> Rabbit | None:
+        if not self.env.is_passable(y, x):
+            return None
+        self._add_rabbit(y, x)
+        return self.rabbits[-1]
         
     # ------------------------------------------------------------------ loop
 

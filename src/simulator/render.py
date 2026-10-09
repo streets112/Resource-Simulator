@@ -519,6 +519,8 @@ class MainRenderer:
                 sim.spawn_predator_at(y, x)
             elif mods & pygame.KMOD_CTRL:
                 sim.spawn_grazer_at(y, x)
+            elif mods & pygame.KMOD_ALT:
+                sim.spawn_rabbit_at(y, x)
             return
         # Outside creator mode a click selects the animal under
         # the cursor for follow mode; clicking bare ground
@@ -1456,6 +1458,7 @@ class MainRenderer:
                 "1-5 brush  +/- size",
                 "ctrl+click grazer",
                 "shift+click predator",
+                "alt+click rabbit",
                 "m to exit",
             ]
         else:
