@@ -89,9 +89,7 @@ class PopulationChart:
     def draw(self, screen, font, small_font, colors) -> None:
         if not self.visible or screen is None or font is None:
             return
-        rect = self.rect if self.rect is not None else pygame.Rect(
-            self.x, self.y, self.width, self.height
-        )
+        rect = self.rect if self.rect is not None else pygame.Rect(self.x, self.y, self.width, self.height)
         if rect.width <= 0 or rect.height <= 0:
             return
         pygame.draw.rect(screen, (18, 18, 28), rect)
@@ -247,11 +245,16 @@ class MainRenderer:
         self._frombuffer_aliases = False
         # Keypad brush key mapping (supports both top-row and numpad)
         self._brush_key_map = {
-            pygame.K_1: 0, pygame.K_KP1: 0,
-            pygame.K_2: 1, pygame.K_KP2: 1,
-            pygame.K_3: 2, pygame.K_KP3: 2,
-            pygame.K_4: 3, pygame.K_KP4: 3,
-            pygame.K_5: 4, pygame.K_KP5: 4,
+            pygame.K_1: 0,
+            pygame.K_KP1: 0,
+            pygame.K_2: 1,
+            pygame.K_KP2: 1,
+            pygame.K_3: 2,
+            pygame.K_KP3: 2,
+            pygame.K_4: 3,
+            pygame.K_KP4: 3,
+            pygame.K_5: 4,
+            pygame.K_KP5: 4,
         }
 
     def _is_brush_key(self, key: int) -> bool:
@@ -307,9 +310,7 @@ class MainRenderer:
         if not PYGAME_AVAILABLE:
             raise RuntimeError("pygame is unavailable; install pygame-ce")
         pygame.init()
-        self.screen = pygame.display.set_mode(
-            (self.vis.window_width, self.vis.window_height), pygame.RESIZABLE
-        )
+        self.screen = pygame.display.set_mode((self.vis.window_width, self.vis.window_height), pygame.RESIZABLE)
         pygame.display.set_caption("Resource Simulator")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont("consolas", 16)
@@ -349,9 +350,7 @@ class MainRenderer:
         self._place_chart()
 
     def _sidebar_rect(self) -> pygame.Rect:
-        return pygame.Rect(
-            self.view_w, 0, self.vis.window_width - self.view_w, self.vis.window_height
-        )
+        return pygame.Rect(self.view_w, 0, self.vis.window_width - self.view_w, self.vis.window_height)
 
     def _draw_sidebar_background(self) -> None:
         """Distinct panel so the map area reads as separate from the sidebar."""
@@ -773,7 +772,7 @@ class MainRenderer:
 
         if not self.quadrant_mode:
             # Overview: terrain hue scaled by resource level, whole cell.
-            base = (shade if shade is not None else colors)  # (H, W, 3)
+            base = shade if shade is not None else colors  # (H, W, 3)
             # view is (H, cell, W, cell, 3), need to broadcast base (H, W, 3) to it
             # base[:, None, :, None, :] -> (H, 1, W, 1, 3) broadcasts to (H, cell, W, cell, 3)
             view[:, :, :, :half, :] = base[:, None, :, None, :]
@@ -866,9 +865,7 @@ class MainRenderer:
         target_w = max(1, int(round(base_w * self.zoom)))
         target_h = max(1, int(round(base_h * self.zoom)))
         if target_w * target_h <= self.SCALE_CACHE_PIXEL_BUDGET:
-            self._scaled_surface = pygame.transform.smoothscale(
-                self._base_surface, (target_w, target_h)
-            )
+            self._scaled_surface = pygame.transform.smoothscale(self._base_surface, (target_w, target_h))
             self._scaled_size = (target_w, target_h)
         else:
             # Too large to keep resident: resample only the visible window each
@@ -935,8 +932,7 @@ class MainRenderer:
         name = type(entity).__name__.lower()
         lines = [
             f"following {name} id {entity.id}",
-            f"  energy {entity.energy:.0f}/{entity.max_energy} "
-            f"({entity.energy_ratio * 100:.0f}%)",
+            f"  energy {entity.energy:.0f}/{entity.max_energy} " f"({entity.energy_ratio * 100:.0f}%)",
             f"  age {entity.age}  at ({int(entity.x)}, {int(entity.y)})",
         ]
         if isinstance(entity, Predator):
@@ -1366,7 +1362,12 @@ class MainRenderer:
                     f"resource: {info['resource']:.1f}/{info['capacity']:.1f} ({info['ratio']*100:.0f}%)",
                 ]
             )
-            for kind, label in (("grazers", "grazer"), ("rabbits", "rabbit"), ("predators", "predator"), ("carcasses", "carcass")):
+            for kind, label in (
+                ("grazers", "grazer"),
+                ("rabbits", "rabbit"),
+                ("predators", "predator"),
+                ("carcasses", "carcass"),
+            ):
                 entities = info["entities"][kind]
                 if not entities:
                     continue
@@ -1376,13 +1377,9 @@ class MainRenderer:
                         state = entity.behavior_state
                         if entity.eating_state != "moving":
                             state = entity.eating_state
-                        lines.append(
-                            f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {state}"
-                        )
+                        lines.append(f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {state}")
                     elif kind == "carcasses":
-                        lines.append(
-                            f"  id {entity.id}  e {entity.energy:.1f}  age {entity.age}"
-                        )
+                        lines.append(f"  id {entity.id}  e {entity.energy:.1f}  age {entity.age}")
                     else:
                         lines.append(
                             f"  id {entity.id}  e {entity.energy:.0f}  age {entity.age}  {entity.foraging_state}"
@@ -1490,8 +1487,7 @@ class MainRenderer:
             f"resource   {stats['total_resource']:.0f}",
             "",
             f"fps {int(round(self.fps_ema))}  steps/s {self.step_rate:.1f}",
-            f"timestep {self.config.simulation.timestep_ms}ms"
-            f"  x{self.config.simulation.simulation_speed:.2f}",
+            f"timestep {self.config.simulation.timestep_ms}ms" f"  x{self.config.simulation.simulation_speed:.2f}",
             f"zoom {self.zoom:.2f}",
             "",
         ]

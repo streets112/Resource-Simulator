@@ -54,9 +54,7 @@ def run_gui(config: Config, seed: int | None) -> None:
         paused = renderer.paused
 
         if not paused and not sim.ended:
-            interval_ms = max(1, config.simulation.timestep_ms) / max(
-                1e-6, config.simulation.simulation_speed
-            )
+            interval_ms = max(1, config.simulation.timestep_ms) / max(1e-6, config.simulation.simulation_speed)
             accumulator += elapsed_ms
             taken = 0
             while accumulator >= interval_ms and taken < MAX_STEPS_PER_FRAME:

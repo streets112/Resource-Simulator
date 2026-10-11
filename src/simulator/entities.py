@@ -1,21 +1,21 @@
+import math
+from collections import deque
 from dataclasses import dataclass, field
 from itertools import count
 from typing import Optional, Protocol
-import math
-from collections import deque
 
 _IDS = count(1)
 
 
 class EntityPool:
     """Object pool for entity reuse to avoid allocation churn."""
-    
+
     def __init__(self, factory, max_size: int = 10000):
         self._factory = factory
         self._available = deque()
         self._max_size = max_size
         self._total_created = 0
-    
+
     def acquire(self, *args, **kwargs):
         if self._available:
             entity = self._available.popleft()
@@ -25,7 +25,7 @@ class EntityPool:
         else:
             self._total_created += 1
             return self._factory(None, *args, **kwargs)
-    
+
     def release(self, entity):
         if entity is not None and len(self._available) < self._max_size:
             # Reset state for reuse
@@ -38,23 +38,23 @@ class EntityPool:
             entity.last_dx = 0
             entity.move_budget = 0.0
             # Reset species-specific state
-            if hasattr(entity, 'foraging_state'):
+            if hasattr(entity, "foraging_state"):
                 entity.foraging_state = "migrating"
-            if hasattr(entity, 'eating_state'):
+            if hasattr(entity, "eating_state"):
                 entity.eating_state = "moving"
-            if hasattr(entity, 'behavior_state'):
+            if hasattr(entity, "behavior_state"):
                 entity.behavior_state = "wandering"
-            if hasattr(entity, 'investigate_timer'):
+            if hasattr(entity, "investigate_timer"):
                 entity.investigate_timer = 0
                 entity.investigate_y = None
                 entity.investigate_x = None
-            if hasattr(entity, 'consumed_by'):
+            if hasattr(entity, "consumed_by"):
                 entity.consumed_by.clear()
             self._available.append(entity)
-    
+
     def __len__(self):
         return len(self._available)
-    
+
     @property
     def total_created(self):
         return self._total_created
@@ -70,13 +70,17 @@ _CARCASS_POOL = None
 def _init_pools():
     """Initialize global entity pools."""
     global _GRAZER_POOL, _RABBIT_POOL, _PREDATOR_POOL, _CARCASS_POOL
-    
+
     def _make_grazer(existing, x, y, energy, config, age, gradient_weight, inherited_gradient_weight):
         if existing is None:
             return Grazer(
-                x=float(x), y=float(y), energy=energy, config=config,
-                age=age, gradient_weight=gradient_weight,
-                inherited_gradient_weight=inherited_gradient_weight
+                x=float(x),
+                y=float(y),
+                energy=energy,
+                config=config,
+                age=age,
+                gradient_weight=gradient_weight,
+                inherited_gradient_weight=inherited_gradient_weight,
             )
         else:
             existing.x = float(x)
@@ -88,13 +92,17 @@ def _init_pools():
             existing.inherited_gradient_weight = inherited_gradient_weight
             existing.alive = True
             return existing
-    
+
     def _make_rabbit(existing, x, y, energy, config, age, gradient_weight, inherited_gradient_weight):
         if existing is None:
             return Rabbit(
-                x=float(x), y=float(y), energy=energy, config=config,
-                age=age, gradient_weight=gradient_weight,
-                inherited_gradient_weight=inherited_gradient_weight
+                x=float(x),
+                y=float(y),
+                energy=energy,
+                config=config,
+                age=age,
+                gradient_weight=gradient_weight,
+                inherited_gradient_weight=inherited_gradient_weight,
             )
         else:
             existing.x = float(x)
@@ -106,12 +114,10 @@ def _init_pools():
             existing.inherited_gradient_weight = inherited_gradient_weight
             existing.alive = True
             return existing
-    
+
     def _make_predator(existing, x, y, energy, config, age):
         if existing is None:
-            return Predator(
-                x=float(x), y=float(y), energy=energy, config=config, age=age
-            )
+            return Predator(x=float(x), y=float(y), energy=energy, config=config, age=age)
         else:
             existing.x = float(x)
             existing.y = float(y)
@@ -120,7 +126,7 @@ def _init_pools():
             existing.age = age
             existing.alive = True
             return existing
-    
+
     def _make_carcass(existing, x, y, energy, max_energy, config):
         if existing is None:
             return Carcass(x=float(x), y=float(y), energy=energy, max_energy=max_energy, config=config)
@@ -134,7 +140,7 @@ def _init_pools():
             existing.alive = True
             existing.consumed_by.clear()
             return existing
-    
+
     _GRAZER_POOL = EntityPool(_make_grazer)
     _RABBIT_POOL = EntityPool(_make_rabbit)
     _PREDATOR_POOL = EntityPool(_make_predator)
@@ -278,9 +284,7 @@ class Prey(Entity):
                     # rewards the species that thrives here.
                     adjustment = surplus * (share - 1.0)
                     before = self.energy
-                    self.energy = min(
-                        self.max_energy, max(0.0, self.energy + adjustment)
-                    )
+                    self.energy = min(self.max_energy, max(0.0, self.energy + adjustment))
                     gained += self.energy - before
         return gained
 

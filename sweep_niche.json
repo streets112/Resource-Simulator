@@ -1,0 +1,494 @@
+[
+  {
+    "params": {
+      "repro": 250,
+      "prey_energy": 35
+    },
+    "result": {
+      "seed": 42,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 265,
+        "mean": 92.95666666666666,
+        "min": 17,
+        "max": 265,
+        "peaks": 5,
+        "amplitude": 2.667909778749955
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 503,
+        "mean": 537.8425,
+        "min": 86,
+        "max": 955,
+        "peaks": 10,
+        "amplitude": 1.6157146376494977
+      },
+      "predator": {
+        "extinct_step": 679,
+        "final": 0,
+        "mean": 4.155,
+        "min": 0,
+        "max": 47,
+        "peaks": 4,
+        "amplitude": 11.311672683513837
+      },
+      "segregation": {
+        "grazer_meadow": 0.969811320754717,
+        "rabbit_scrub": 0.18886679920477137
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 250,
+      "prey_energy": 35
+    },
+    "result": {
+      "seed": 7,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 250,
+        "mean": 128.69833333333332,
+        "min": 23,
+        "max": 271,
+        "peaks": 10,
+        "amplitude": 1.9269868814669966
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 373,
+        "mean": 478.2658333333333,
+        "min": 200,
+        "max": 616,
+        "peaks": 18,
+        "amplitude": 0.8698091542534748
+      },
+      "predator": {
+        "extinct_step": 985,
+        "final": 0,
+        "mean": 16.640833333333333,
+        "min": 0,
+        "max": 59,
+        "peaks": 11,
+        "amplitude": 3.545495518052982
+      },
+      "segregation": {
+        "grazer_meadow": 0.796,
+        "rabbit_scrub": 0.26541554959785524
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 250,
+      "prey_energy": 35
+    },
+    "result": {
+      "seed": 123,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 356,
+        "mean": 371.4741666666667,
+        "min": 288,
+        "max": 432,
+        "peaks": 16,
+        "amplitude": 0.38764472181780246
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 299,
+        "mean": 350.5441666666667,
+        "min": 277,
+        "max": 477,
+        "peaks": 16,
+        "amplitude": 0.570541515215629
+      },
+      "predator": {
+        "extinct_step": 816,
+        "final": 0,
+        "mean": 8.589166666666667,
+        "min": 0,
+        "max": 61,
+        "peaks": 3,
+        "amplitude": 7.101969535267293
+      },
+      "segregation": {
+        "grazer_meadow": 0.6825842696629213,
+        "rabbit_scrub": 0.18394648829431437
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 250,
+      "prey_energy": 55
+    },
+    "result": {
+      "seed": 42,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 137,
+        "mean": 34.0675,
+        "min": 9,
+        "max": 137,
+        "peaks": 6,
+        "amplitude": 3.7572466426946503
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 563,
+        "mean": 549.2716666666666,
+        "min": 67,
+        "max": 896,
+        "peaks": 13,
+        "amplitude": 1.5092713684485213
+      },
+      "predator": {
+        "extinct_step": 395,
+        "final": 0,
+        "mean": 0.9066666666666666,
+        "min": 0,
+        "max": 27,
+        "peaks": 0,
+        "amplitude": 29.779411764705884
+      },
+      "segregation": {
+        "grazer_meadow": 0.9343065693430657,
+        "rabbit_scrub": 0.12966252220248667
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 250,
+      "prey_energy": 55
+    },
+    "result": {
+      "seed": 7,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 259,
+        "mean": 221.1275,
+        "min": 33,
+        "max": 365,
+        "peaks": 11,
+        "amplitude": 1.5013962532927836
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 432,
+        "mean": 376.3575,
+        "min": 15,
+        "max": 641,
+        "peaks": 9,
+        "amplitude": 1.6633121433743183
+      },
+      "predator": {
+        "extinct_step": 450,
+        "final": 0,
+        "mean": 1.0308333333333333,
+        "min": 0,
+        "max": 29,
+        "peaks": 0,
+        "amplitude": 28.132578819725143
+      },
+      "segregation": {
+        "grazer_meadow": 0.5482625482625483,
+        "rabbit_scrub": 0.23842592592592593
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 250,
+      "prey_energy": 55
+    },
+    "result": {
+      "seed": 123,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 419,
+        "mean": 440.1383333333333,
+        "min": 332,
+        "max": 570,
+        "peaks": 12,
+        "amplitude": 0.5407390858177165
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 395,
+        "mean": 356.89416666666665,
+        "min": 243,
+        "max": 548,
+        "peaks": 10,
+        "amplitude": 0.8545950830428255
+      },
+      "predator": {
+        "extinct_step": 420,
+        "final": 0,
+        "mean": 0.4075,
+        "min": 0,
+        "max": 9,
+        "peaks": 1,
+        "amplitude": 22.085889570552148
+      },
+      "segregation": {
+        "grazer_meadow": 0.7589498806682577,
+        "rabbit_scrub": 0.18227848101265823
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 350,
+      "prey_energy": 35
+    },
+    "result": {
+      "seed": 42,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 525,
+        "mean": 358.8908333333333,
+        "min": 20,
+        "max": 672,
+        "peaks": 6,
+        "amplitude": 1.8167084234063748
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 255,
+        "mean": 294.5625,
+        "min": 54,
+        "max": 525,
+        "peaks": 6,
+        "amplitude": 1.5989815404201146
+      },
+      "predator": {
+        "extinct_step": 510,
+        "final": 0,
+        "mean": 2.0991666666666666,
+        "min": 0,
+        "max": 29,
+        "peaks": 2,
+        "amplitude": 13.815005954743945
+      },
+      "segregation": {
+        "grazer_meadow": 0.780952380952381,
+        "rabbit_scrub": 0.27058823529411763
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 350,
+      "prey_energy": 35
+    },
+    "result": {
+      "seed": 7,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 109,
+        "mean": 206.585,
+        "min": 109,
+        "max": 318,
+        "peaks": 13,
+        "amplitude": 1.0116901033472905
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 319,
+        "mean": 374.3675,
+        "min": 141,
+        "max": 568,
+        "peaks": 11,
+        "amplitude": 1.1405904625802186
+      },
+      "predator": {
+        "extinct_step": null,
+        "final": 55,
+        "mean": 30.543333333333333,
+        "min": 14,
+        "max": 65,
+        "peaks": 28,
+        "amplitude": 1.6697588126159555
+      },
+      "segregation": {
+        "grazer_meadow": 0.6513761467889908,
+        "rabbit_scrub": 0.4200626959247649
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 350,
+      "prey_energy": 35
+    },
+    "result": {
+      "seed": 123,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 112,
+        "mean": 296.0491666666667,
+        "min": 112,
+        "max": 436,
+        "peaks": 20,
+        "amplitude": 1.0944128086832423
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 153,
+        "mean": 276.6975,
+        "min": 119,
+        "max": 433,
+        "peaks": 11,
+        "amplitude": 1.134813288880456
+      },
+      "predator": {
+        "extinct_step": null,
+        "final": 62,
+        "mean": 53.111666666666665,
+        "min": 22,
+        "max": 80,
+        "peaks": 19,
+        "amplitude": 1.0920387862051653
+      },
+      "segregation": {
+        "grazer_meadow": 0.5625,
+        "rabbit_scrub": 0.23529411764705882
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 350,
+      "prey_energy": 55
+    },
+    "result": {
+      "seed": 42,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 560,
+        "mean": 385.64416666666665,
+        "min": 55,
+        "max": 761,
+        "peaks": 6,
+        "amplitude": 1.8307031741264077
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 226,
+        "mean": 236.045,
+        "min": 37,
+        "max": 377,
+        "peaks": 7,
+        "amplitude": 1.44040331292762
+      },
+      "predator": {
+        "extinct_step": 631,
+        "final": 0,
+        "mean": 10.796666666666667,
+        "min": 0,
+        "max": 78,
+        "peaks": 2,
+        "amplitude": 7.224451991355356
+      },
+      "segregation": {
+        "grazer_meadow": 0.7285714285714285,
+        "rabbit_scrub": 0.23893805309734514
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 350,
+      "prey_energy": 55
+    },
+    "result": {
+      "seed": 7,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 366,
+        "mean": 239.06,
+        "min": 89,
+        "max": 366,
+        "peaks": 9,
+        "amplitude": 1.1587049276332302
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 262,
+        "mean": 303.4008333333333,
+        "min": 70,
+        "max": 537,
+        "peaks": 11,
+        "amplitude": 1.5392179212867467
+      },
+      "predator": {
+        "extinct_step": null,
+        "final": 26,
+        "mean": 21.366666666666667,
+        "min": 3,
+        "max": 63,
+        "peaks": 20,
+        "amplitude": 2.8081123244929795
+      },
+      "segregation": {
+        "grazer_meadow": 0.7103825136612022,
+        "rabbit_scrub": 0.31297709923664124
+      }
+    }
+  },
+  {
+    "params": {
+      "repro": 350,
+      "prey_energy": 55
+    },
+    "result": {
+      "seed": 123,
+      "ended": false,
+      "grazer": {
+        "extinct_step": null,
+        "final": 258,
+        "mean": 151.715,
+        "min": 96,
+        "max": 258,
+        "peaks": 14,
+        "amplitude": 1.067791582902152
+      },
+      "rabbit": {
+        "extinct_step": null,
+        "final": 285,
+        "mean": 197.59833333333333,
+        "min": 37,
+        "max": 312,
+        "peaks": 9,
+        "amplitude": 1.3917121433210469
+      },
+      "predator": {
+        "extinct_step": null,
+        "final": 4,
+        "mean": 34.92666666666667,
+        "min": 4,
+        "max": 59,
+        "peaks": 25,
+        "amplitude": 1.5747280015270089
+      },
+      "segregation": {
+        "grazer_meadow": 0.7248062015503876,
+        "rabbit_scrub": 0.3368421052631579
+      }
+    }
+  }
+]

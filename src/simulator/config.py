@@ -199,10 +199,7 @@ def load_config(path: str | Path = "config.yaml") -> Config:
     sim = _build(SimConfig, sim_raw)
 
     env_raw = dict(raw.get("environment", {}))
-    terrains = {
-        name: _build(TerrainConfig, body)
-        for name, body in env_raw.get("terrain_types", {}).items()
-    }
+    terrains = {name: _build(TerrainConfig, body) for name, body in env_raw.get("terrain_types", {}).items()}
     # Per-species productivity falls back to the shared value when a
     # terrain does not override it.
     for terrain_cfg in terrains.values():

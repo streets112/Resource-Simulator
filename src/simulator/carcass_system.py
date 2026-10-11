@@ -1,21 +1,23 @@
 """Carcass system for carcass decay and management."""
+
 from __future__ import annotations
 
-import numpy as np
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
-    from simulator.simulation import Simulation
-    from simulator.entities import Carcass
     from simulator.config import CarcassConfig
+    from simulator.entities import Carcass
+    from simulator.simulation import Simulation
 
 
 class CarcassSystem:
     """Handles carcass decay and management."""
-    
+
     def __init__(self, sim) -> None:
         self.sim = sim
-    
+
     def step_carcasses(self) -> None:
         """Step all carcasses and remove expired ones."""
         alive_carcasses = []

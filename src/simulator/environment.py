@@ -4,12 +4,9 @@ from scipy.ndimage import (
     binary_dilation,
     binary_erosion,
     binary_opening,
-    convolve as nd_convolve,
-    distance_transform_edt,
-    gaussian_filter,
-    label,
 )
-
+from scipy.ndimage import convolve as nd_convolve
+from scipy.ndimage import distance_transform_edt, gaussian_filter, label
 from simulator.config import EnvironmentConfig
 
 _NEIGHBOUR_KERNEL = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=np.float64)
@@ -101,9 +98,7 @@ class Environment:
                 wanted = min(wanted, available_cells)
                 if weights[name] <= 0 or wanted <= 0:
                     continue
-                score = _normalize(
-                    noise * 0.5 + (1.0 - base_noise) * 0.3 + mountain_proximity * 0.2
-                )
+                score = _normalize(noise * 0.5 + (1.0 - base_noise) * 0.3 + mountain_proximity * 0.2)
                 cutoff = np.quantile(score[available], 1.0 - wanted / available_cells)
                 mask = available & (score >= cutoff)
                 if expands:
@@ -270,9 +265,7 @@ class Environment:
         """Organic growth of forest into adjacent open ground near mountains."""
         mountain_distance = distance_transform_edt(~available)
         for _ in range(3):
-            neighbours = nd_convolve(
-                forest_mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest"
-            )
+            neighbours = nd_convolve(forest_mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest")
             grow = (neighbours >= 4) | ((neighbours >= 3) & (mountain_distance < 6))
             forest_mask = forest_mask | (grow & available)
         return forest_mask
@@ -281,9 +274,7 @@ class Environment:
         for _ in range(iterations):
             counts = np.stack(
                 [
-                    nd_convolve(
-                        (terrain == idx).astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest"
-                    )
+                    nd_convolve((terrain == idx).astype(np.float64), _NEIGHBOUR_KERNEL, mode="nearest")
                     for idx in range(len(names))
                 ]
             )
@@ -336,9 +327,9 @@ class Environment:
             if i == 0:
                 smoothed[i] = noise[i]
             elif i == length - 1:
-                smoothed[i] = (noise[i-1] + noise[i]) * 0.5
+                smoothed[i] = (noise[i - 1] + noise[i]) * 0.5
             else:
-                smoothed[i] = (noise[i-1] + noise[i] + noise[i+1]) / 3.0
+                smoothed[i] = (noise[i - 1] + noise[i] + noise[i + 1]) / 3.0
         return smoothed
 
     def _apply_ocean_border(self) -> None:
@@ -346,10 +337,10 @@ class Environment:
         if border <= 0:
             return
         ocean = self._terrain_index["ocean"]
-        
+
         # Generate wavy border widths for each side
         variation = max(2, border)  # Larger variation for more organic look
-        
+
         # Generate noise for each side using 1D perlin noise with different seeds
         # Top border: wave along x
         top_noise = self._perlin_1d(self.width, 0.03, 0) * variation + border
@@ -359,27 +350,27 @@ class Environment:
         left_noise = self._perlin_1d(self.height, 0.03, 2000) * variation + border
         # Right border: wave along y (different seed)
         right_noise = self._perlin_1d(self.height, 0.05, 3000) * variation + border
-        
+
         top_noise = np.clip(top_noise, border, border * 3).astype(int)
         bottom_noise = np.clip(bottom_noise, border, border * 3).astype(int)
         left_noise = np.clip(left_noise, border, border * 3).astype(int)
         right_noise = np.clip(right_noise, border, border * 3).astype(int)
-        
+
         # Top border
         for x in range(self.width):
             w = int(top_noise[x])
             self.terrain[:w, x] = self._terrain_index["ocean"]
-        
+
         # Bottom border
         for x in range(self.width):
             w = int(bottom_noise[x])
             self.terrain[-w:, x] = self._terrain_index["ocean"]
-        
+
         # Left border
         for y in range(self.height):
             w = int(left_noise[y])
             self.terrain[y, :w] = self._terrain_index["ocean"]
-        
+
         # Right border
         for y in range(self.height):
             w = int(right_noise[y])
@@ -439,42 +430,42 @@ class Environment:
 
     def _update_scent(self, wind_dir: float, wind_intensity: float, dt: float = 1.0) -> None:
         """Update scent field: decay + advection (wind) + diffusion.
-        
+
         Scent flows downwind from prey positions. Predators use gradient descent
         to follow the strongest scent concentration. At 20 cells distance,
         scent spreads to ~6 cells width with ~1/6 intensity.
         """
         # Decay: scent fades over time
         self.scent *= 0.99  # 1% decay per step
-        
+
         # Advection: wind pushes scent downwind
         if wind_intensity > 0.01:
             wind_dx = float(np.cos(wind_dir)) * wind_intensity
             wind_dy = float(np.sin(wind_dir)) * wind_intensity
-            
+
             # Use upwind scheme for advection (more stable)
             advected = np.zeros_like(self.scent)
             shift_y = int(round(wind_dy * 3))
             shift_x = int(round(wind_dx * 3))
-            
+
             if shift_y >= 0:
-                advected[shift_y:, :] = self.scent[:-shift_y if shift_y else None, :]
+                advected[shift_y:, :] = self.scent[: -shift_y if shift_y else None, :]
             else:
                 advected[:shift_y] = self.scent[-shift_y:, :]
-            
+
             if shift_x >= 0:
-                advected[:, shift_x:] = advected[:, :-shift_x if shift_x else None]
+                advected[:, shift_x:] = advected[:, : -shift_x if shift_x else None]
             else:
                 advected[:, :shift_x] = advected[:, -shift_x:]
-            
+
             # Blend advected scent with original (partial advection)
             self.scent = 0.7 * self.scent + 0.3 * advected
-        
+
         # Diffusion: spread scent to neighbors (Gaussian-like spread)
         # This creates the 20 cells = 6 cells width, 1/6 intensity effect
         laplacian = nd_convolve(self.scent, _LAPLACIAN_KERNEL * 0.05, mode="wrap")
         self.scent += laplacian
-        
+
         np.clip(self.scent, 0.0, 1.0, out=self.scent)
 
     def _regenerate(self) -> None:
@@ -503,35 +494,31 @@ class Environment:
         np.divide(self.resources, self.resource_capacity, out=ratio, where=cap_mask)
 
         neighbour_sum = nd_convolve(ratio, _NEIGHBOUR_KERNEL, mode="wrap")
-        neighbour_count = nd_convolve(
-            cap_mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="wrap"
-        )
-        neighbour_avg = np.where(
-            neighbour_count > 0, neighbour_sum / np.maximum(neighbour_count, 1e-8), 1.0
-        )
+        neighbour_count = nd_convolve(cap_mask.astype(np.float64), _NEIGHBOUR_KERNEL, mode="wrap")
+        neighbour_avg = np.where(neighbour_count > 0, neighbour_sum / np.maximum(neighbour_count, 1e-8), 1.0)
         return np.clip(1.0 - neighbour_avg / self.config.depletion_threshold, 0.0, 1.0)
 
     def _diffuse(self) -> None:
         rate = self.config.resource_diffusion_rate
         if rate <= 0:
             return
-        
+
         # Diffuse only within the same terrain type to prevent
         # resources from leaking across terrain boundaries (e.g., rock -> plains)
         for terrain_idx in range(len(self.terrain_names)):
-            mask = (self.terrain == terrain_idx)
+            mask = self.terrain == terrain_idx
             if not mask.any():
                 continue
-            
+
             # Extract resources for this terrain type
             masked_resources = np.where(mask, self.resources, 0.0)
-            
+
             # Apply diffusion only within this terrain type
             laplacian = nd_convolve(masked_resources, _LAPLACIAN_KERNEL * rate, mode="wrap")
-            
+
             # Only apply diffusion where the terrain matches
             self.resources += np.where(mask, laplacian, 0.0)
-        
+
         np.clip(self.resources, 0.0, self.resource_capacity, out=self.resources)
 
     def _update_depletion_signal(self) -> None:
