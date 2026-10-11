@@ -220,6 +220,11 @@ class MainRenderer:
         self.following = None
         self._panning = False
         self._last_mouse = (0, 0)
+        self._last_frame_ticks = None
+        self.fps_ema = 0.0
+        self._rate_last_step = None
+        self._rate_steps = 0
+        self._rate_ms = 0.0
 
         self.chart = PopulationChart(10, 10, 400, 260)
         self.fps = self.vis.fps or 60
@@ -240,6 +245,20 @@ class MainRenderer:
         self._base_resources = True
         self._cell_colors: np.ndarray | None = None
         self._frombuffer_aliases = False
+        # Keypad brush key mapping (supports both top-row and numpad)
+        self._brush_key_map = {
+            pygame.K_1: 0, pygame.K_KP1: 0,
+            pygame.K_2: 1, pygame.K_KP2: 1,
+            pygame.K_3: 2, pygame.K_KP3: 2,
+            pygame.K_4: 3, pygame.K_KP4: 3,
+            pygame.K_5: 4, pygame.K_KP5: 4,
+        }
+
+    def _is_brush_key(self, key: int) -> bool:
+        return key in self._brush_key_map
+
+    def _brush_key_to_idx(self, key: int) -> int:
+        return self._brush_key_map[key]
 
         # --- cached scaled layer --------------------------------------------
         self._scaled_surface = None
@@ -404,7 +423,7 @@ class MainRenderer:
                 if self._handle_key(event, sim):
                     return "quit"
             elif event.type == pygame.KEYUP:
-                if self.creator_mode and pygame.K_1 <= event.key <= pygame.K_1 + len(self.BRUSHES) - 1:
+                if self.creator_mode and self._is_brush_key(event.key):
                     self._held_brush_keys.discard(event.key)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
@@ -514,9 +533,9 @@ class MainRenderer:
         elif key == pygame.K_m:
             self.creator_mode = not self.creator_mode
             self._held_brush_keys.clear()
-        elif self.creator_mode and pygame.K_1 <= key <= pygame.K_1 + len(self.BRUSHES) - 1:
+        elif self.creator_mode and self._is_brush_key(key):
             self._held_brush_keys.add(key)
-            self._show_brush_hint(key - pygame.K_1)
+            self._show_brush_hint(self._brush_key_to_idx(key))
         self.dirty = True
         return False
 

@@ -109,7 +109,7 @@ environment:
   depletion_signal_smoothing: 0.7
 
 grazer:
-  initial_count: 200
+  initial_count: 300
   max_energy: 1000
   energy_per_step: 5
   # Intake is planned as energy_from_resource * efficiency, but consume_resource
@@ -160,7 +160,7 @@ grazer:
   grazing_move_multiplier: 0.667
 
 rabbit:
-  initial_count: 100
+  initial_count: 600
   max_energy: 400
   # Metabolism must exceed the best intake available while travelling, otherwise
   # rabbits never need to stop. Travelling yield peaks at

@@ -42,7 +42,7 @@ def test_config_exposes_spec_parameters(config):
     assert config.environment.ocean_border_width == 5
     # SPECIFICATION.md terrain table: rock is passable slow terrain.
     assert config.environment.terrain_types["rock"].passable is True
-    assert config.grazer.herd_radius == 8
+    assert config.grazer.herd_radius == 5
     assert config.grazer.reproduction_energy_cost == pytest.approx(0.45)
     assert config.carcass.feed_radius == 1
 

@@ -1,10 +1,25 @@
+from contextlib import contextmanager
+from typing import TYPE_CHECKING
+
 import math
+import time
 import numpy as np
 from dataclasses import dataclass, field
 
 from simulator.config import Config
 from simulator.environment import Environment
+from simulator.movement import MovementSystem
+from simulator.foraging import ForagingSystem
+from simulator.predator_behavior import PredatorBehaviorSystem
+from simulator.reproduction import ReproductionSystem
+from simulator.carcass_system import CarcassSystem
 from simulator.entities import Carcass, Grazer, Predator, Rabbit
+from simulator.entities import get_grazer_pool, get_rabbit_pool, get_predator_pool, get_carcass_pool
+
+if TYPE_CHECKING:
+    from simulator.config import PreyConfig
+    from simulator.environment import Environment
+    from simulator.entities import Prey, Predator
 
 
 def _sign(value: float) -> int:
@@ -13,6 +28,16 @@ def _sign(value: float) -> int:
     if value < 0:
         return -1
     return 0
+
+
+@contextmanager
+def _timer(stats: dict, key: str):
+    """Context manager to time a block and accumulate in stats dict."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        stats[key] = stats.get(key, 0.0) + (time.perf_counter() - start)
 
 
 # Weight of the terrain-affinity bonus in forage targeting. Mild on
@@ -107,6 +132,15 @@ class _Counters:
     kills_rabbit: int = 0
 
 
+@contextmanager
+def _timer(stats: dict, key: str):
+    """Context manager to time a block and accumulate in stats dict."""
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        stats[key] = stats.get(key, 0.0) + (time.perf_counter() - start)
+
 class Simulation:
     def __init__(
         self,
@@ -146,9 +180,15 @@ class Simulation:
         # Virtual wind for predator scent tracking. Direction (radians), intensity 0-1.
         self._wind_dir = float(self.rng.uniform(0, 2 * np.pi))
         self._wind_intensity = float(self.rng.uniform(0.3, 1.0))
+        self._profile_stats: dict[str, float] = {}
         self._wind_change_rate = 0.05
         
         self._refresh_fields()
+        self.movement = MovementSystem(self)
+        self.foraging = ForagingSystem(self)
+        self.predator_behavior = PredatorBehaviorSystem(self)
+        self.reproduction = ReproductionSystem(self)
+        self.carcass_system = CarcassSystem(self)
         self._spawn_initial_entities()
         
     # ------------------------------------------------------------- life cycle
@@ -449,15 +489,14 @@ class Simulation:
         self.env.step(occupied=self._grazed, wind_dir=self._wind_dir, wind_intensity=self._wind_intensity)
         self._refresh_fields()
         self._build_indices()
-        
-        for carcass in self.carcasses:
-            carcass.step()
-        
+
+        self.carcass_system.step_carcasses()
+
         self._update_prey(self.grazers, self.config.grazer, "grazer")
         self._update_prey(self.rabbits, self.config.rabbit, "rabbit")
-        self._update_predators()
+        self.predator_behavior.update_predators()
         
-        self._reproduce()
+        self.reproduction.reproduce()
         self._cleanup()
         
         # Consumed by the next step's regeneration pass.
@@ -507,13 +546,13 @@ class Simulation:
                 or ratio <= cfg.migrate_ratio_threshold
                 or energy_ratio >= cfg.wander_energy_threshold
             ):
-                return "migrating"
+                        return "migrating"
             # If stationary intake has dropped below what moving would give
             # on a full cell, leave before the cell is stripped.
             stationary = cfg.energy_from_resource * cfg.grazing_efficiency * (0.4 + 0.6 * math.exp(-5.0 * (1.0 - ratio)))
             moving_baseline = cfg.energy_from_resource * cfg.moving_efficiency
             if stationary < moving_baseline and energy_ratio > cfg.graze_resume_energy:
-                return "migrating"
+                        return "migrating"
             return "grazing"
         
         # Starvation escape: if critically low, settle on ANY passable cell
@@ -536,43 +575,7 @@ class Simulation:
         return "migrating"
         
     def _update_prey(self, flock: list, cfg, kind: str) -> None:
-        for prey in flock:
-            if not prey.alive:
-                continue
-        
-            was_alive = prey.alive
-            prey.step_energy()
-            if was_alive and not prey.alive:
-                self._record_death(kind)
-        
-            if not prey.alive:
-                continue
-        
-            state = self._foraging_state(prey, cfg)
-        
-            if cfg.migratory:
-                prey.foraging_state = state
-                if state == "grazing":
-                    # Standing still: feed hard, do not move.
-                    gained = prey.eat(self.env, cfg.grazing_efficiency)
-                    if gained > 0:
-                        self._mark_grazed(prey)
-                    continue
-                # Travelling: feed on the move, at a rate that cannot cover
-                # metabolism, so the journey costs energy.
-                prey.eat(self.env, cfg.moving_efficiency)
-                herd = self._herd_vectors(prey, self._prey_index, cfg)
-                target = self._forage_target(prey, cfg)
-                if self._move_prey(prey, cfg, herd, target):
-                    self._record_death(kind)
-                continue
-        
-            herd = self._herd_vectors(prey, self._prey_index, cfg)
-            target = self._forage_target(prey, cfg)
-            if self._move_prey(prey, cfg, herd, target):
-                self._record_death(kind)
-            if prey.eat(self.env) > 0:
-                self._mark_grazed(prey)
+        self.foraging.update_prey(flock, cfg, kind)
         
     def _mark_grazed(self, prey) -> None:
         """Record that this cell is being fed on, so a camped herd strips it.
