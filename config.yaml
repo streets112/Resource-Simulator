@@ -209,11 +209,12 @@ rabbit:
 
 predator:
   initial_count: 30
-  max_energy: 800
+  max_energy: 1800
   energy_per_step: 4
-  # Reduced from 65 to make predators less voracious - they now get less energy per kill
-  # which forces them to hunt more selectively and prevents overconsumption
-  energy_from_prey: 100
+  # Increased from 100 to 200 - predators now gain 2x energy per bite
+  # This makes kills meaningful: a single kill should sustain a predator
+  # for many steps, making hunting worthwhile.
+  energy_from_prey: 200
   # Increased from 70 to slow reproduction - predators take longer to reach maturity
   reproduction_min_age: 120
   # Increased from 200 to require more energy reserves before reproducing
@@ -269,11 +270,10 @@ predator:
 carcass:
   decay_rate: 0.98
   min_energy: 1.0
-  carcass_energy_fraction: 1.0
-  # Lower divisor means a carcass is drained in fewer steps, so a kill is cashed
-  # in at roughly half the metabolic burn of sitting on it. The drain rate
-  # (energy_from_prey / divisor) must exceed predator metabolism (4/step) or
-  # scavenging is net-negative and predators slowly starve.
+  # Carcass gives 200% of prey's energy - makes hunting very rewarding
+  carcass_energy_fraction: 2.0
+  # 4 steps to consume 100% of carcass, allowing multiple predators to share
+  # Drain rate (energy_from_prey / divisor) = 50/step, 4 steps to consume.
   consumption_divisor: 4.0
   feed_radius: 1
 

@@ -113,11 +113,19 @@ class PredatorBehaviorSystem:
             # Oldest first
             feeders.sort(key=lambda p: p.age)
             for predator in feeders:
-                draw = min(per_step, carcass.energy)
+                # Stop eating if predator is full
+                if predator.energy >= predator.max_energy:
+                    predator.eating_state = "moving"
+                    continue
+                draw = min(per_step, carcass.energy, predator.max_energy - predator.energy)
+                if draw <= 0:
+                    predator.eating_state = "moving"
+                    continue
                 carcass.energy -= draw
                 predator.energy += draw
                 predator.eating_state = "feeding"
                 if not carcass.provides_energy:
+                    predator.eating_state = "moving"
                     break
 
     def _predator_kill_prey(self, predator) -> bool:
@@ -161,44 +169,24 @@ class PredatorBehaviorSystem:
                 return True
         return False
 
-    def _scent_gradient(self, predator) -> tuple[float, float] | None:
-        """Return (dy, dx) scent gradient for the predator, or None.
-
-        Scent flows downwind from prey positions. Predators use gradient descent
-        to follow the strongest scent concentration.
-        """
+    def _strongest_scent_cell(self, predator) -> tuple[int, int] | None:
+        """Return the coordinates of the cell with the strongest scent within range."""
         py, px = int(predator.y), int(predator.x)
         radius = self.sim.config.predator.scent_radius
         y0, y1 = max(0, py - radius), min(self.sim.map_height, py + radius + 1)
         x0, x1 = max(0, px - radius), min(self.sim.map_width, px + radius + 1)
 
-        # Scent strength from prey in the neighbourhood, weighted by distance
-        # and carried downwind.
-        wind_x = float(np.cos(self.sim._wind_dir)) * self.sim._wind_intensity
-        wind_y = float(np.sin(self.sim._wind_dir)) * self.sim._wind_intensity
-
-        grad_y = grad_x = 0.0
-        found = False
-        for prey in self.sim._prey_index.query(y0, y1 - 1, x0, x1 - 1):
-            if not prey.alive:
-                continue
-            ty, tx = int(prey.y), int(prey.x)
-            dy = ty - py
-            dx = tx - px
-            dist = max(1, self.distance(py, px, ty, tx))
-            # Scent is stronger closer and further UPWIND (scent flows downwind FROM prey)
-            # wind_x * dx + wind_y * dy is positive when prey is downwind of predator
-            # We want higher strength when prey is UPWIND (negative dot product)
-            # Normalize dot product by distance to keep strength in valid range
-            dot = (wind_x * dx + wind_y * dy) / dist
-            strength = (1.0 / dist) * max(0.0, 1.0 - dot)
-            grad_y += (ty - py) * strength / dist
-            grad_x += (tx - px) * strength / dist
-            found = True
-
-        if not found:
+        # Find the cell with the strongest scent
+        scent_slice = self.sim.env.scent[y0:y1, x0:x1]
+        if scent_slice.size == 0:
             return None
-        return (grad_y, grad_x)
+
+        max_idx = np.argmax(scent_slice)
+        if scent_slice.flat[scent_slice.argmax()] <= 0.01:  # Minimum threshold
+            return None
+
+        max_y, max_x = np.unravel_index(max_idx, scent_slice.shape)
+        return y0 + max_y, x0 + max_x
 
     def distance(self, y1: int, x1: int, y2: int, x2: int) -> int:
         """SPECIFICATION.md bounded Chebyshev distance (toroidal)."""
@@ -243,17 +231,13 @@ class PredatorBehaviorSystem:
         # Only hunt if hungry
         if hungry:
             # Priority 2: Follow scent gradient downwind
-            scent = self._scent_gradient(predator)
-            if scent is not None:
+            scent_target = self._strongest_scent_cell(predator)
+            if scent_target is not None:
                 predator.behavior_state = "scent_tracking"
-                magnitude = math.hypot(scent[0], scent[1])
-                if magnitude > 0.0:
-                    look_ahead = float(min(cfg.scent_radius, 8))
-                    ty = int(predator.y + scent[0] / magnitude * look_ahead)
-                    tx = int(predator.x + scent[1] / magnitude * look_ahead)
-                    ty, tx = self.sim.env.clamp(ty, tx)
-                    self.sim.movement.move_predator_toward(predator, ty, tx)
-                    return
+                ty, tx = scent_target
+                ty, tx = self.sim.env.clamp(ty, tx)
+                self.sim.movement.move_predator_toward(predator, ty, tx)
+                return
 
             # Priority 3: Investigate depletion
             if self.sim._investigate_depletion(predator):
