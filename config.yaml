@@ -160,7 +160,7 @@ grazer:
   grazing_move_multiplier: 0.667
 
 rabbit:
-  initial_count: 600
+  initial_count: 300
   max_energy: 400
   # Metabolism must exceed the best intake available while travelling, otherwise
   # rabbits never need to stop. Travelling yield peaks at

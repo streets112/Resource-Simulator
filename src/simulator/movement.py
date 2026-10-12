@@ -134,6 +134,7 @@ class MovementSystem:
         mobility = self.sim.env.mobility_predator[py, px]
 
         speed = self.sim.config.predator.chase_speed_multiplier if chasing else 1.0
+        speed *= predator.chase_speed_factor
         cost = self.sim.config.predator.chase_cost_multiplier if chasing else 1.0
         allowance = predator.movement_allowance(mobility * speed)
         moved = 0

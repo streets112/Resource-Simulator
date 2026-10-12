@@ -1,4 +1,5 @@
 import math
+import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
 from itertools import count
@@ -73,7 +74,7 @@ def _init_pools():
 
     def _make_grazer(existing, x, y, energy, config, age, gradient_weight, inherited_gradient_weight):
         if existing is None:
-            return Grazer(
+            grazer = Grazer(
                 x=float(x),
                 y=float(y),
                 energy=energy,
@@ -82,6 +83,17 @@ def _init_pools():
                 gradient_weight=gradient_weight,
                 inherited_gradient_weight=inherited_gradient_weight,
             )
+            # Add initial variation to heritable traits
+            grazer.speed_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.metabolism_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.vision_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.grazing_efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.moving_efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.forage_vision_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            grazer.gradient_weight = gradient_weight
+            grazer.inherited_gradient_weight = inherited_gradient_weight
+            return grazer
         else:
             existing.x = float(x)
             existing.y = float(y)
@@ -95,7 +107,7 @@ def _init_pools():
 
     def _make_rabbit(existing, x, y, energy, config, age, gradient_weight, inherited_gradient_weight):
         if existing is None:
-            return Rabbit(
+            rabbit = Rabbit(
                 x=float(x),
                 y=float(y),
                 energy=energy,
@@ -104,6 +116,17 @@ def _init_pools():
                 gradient_weight=gradient_weight,
                 inherited_gradient_weight=inherited_gradient_weight,
             )
+            # Add initial variation to heritable traits
+            rabbit.speed_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.metabolism_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.vision_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.grazing_efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.moving_efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.forage_vision_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            rabbit.gradient_weight = gradient_weight
+            rabbit.inherited_gradient_weight = inherited_gradient_weight
+            return rabbit
         else:
             existing.x = float(x)
             existing.y = float(y)
@@ -117,7 +140,15 @@ def _init_pools():
 
     def _make_predator(existing, x, y, energy, config, age):
         if existing is None:
-            return Predator(x=float(x), y=float(y), energy=energy, config=config, age=age)
+            predator = Predator(x=float(x), y=float(y), energy=energy, config=config, age=age)
+            # Add initial variation to heritable traits
+            predator.speed_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            predator.metabolism_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            predator.chase_speed_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            predator.hunt_efficiency_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            predator.scent_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            predator.vision_factor = float(np.clip(np.random.normal(1.0, 0.05), 0.5, 1.5))
+            return predator
         else:
             existing.x = float(x)
             existing.y = float(y)
@@ -188,6 +219,11 @@ class Entity:
     last_dy: int = 0
     last_dx: int = 0
     move_budget: float = 0.0
+    # Individual variation traits (heritable with mutation)
+    speed_factor: float = 1.0
+    metabolism_factor: float = 1.0
+    efficiency_factor: float = 1.0
+    vision_factor: float = 1.0
 
     @property
     def max_energy(self) -> float:
@@ -200,10 +236,10 @@ class Entity:
 
     @property
     def move_speed(self) -> int:
-        return int(self.config.move_speed)
+        return int(self.config.move_speed * self.speed_factor)
 
     def step_energy(self) -> None:
-        self.energy -= float(self.config.energy_per_step)
+        self.energy -= float(self.config.energy_per_step) * self.metabolism_factor
         self.age += 1
         if self.energy <= 0:
             self.energy = 0.0
@@ -229,7 +265,7 @@ class Entity:
         instead makes rock genuinely cost time -- one cell every two steps --
         which is what lets ridges channel movement while staying passable.
         """
-        self.move_budget += self.move_speed * mobility
+        self.move_budget += self.move_speed * mobility * self.speed_factor
         steps = int(self.move_budget)
         self.move_budget -= steps
         return steps
@@ -246,15 +282,33 @@ class Prey(Entity):
     inherited_gradient_weight: float = 0.7
     vision_radius: int = 5
     foraging_state: str = "migrating"
+    # Heritable traits with mutation
+    grazing_efficiency_factor: float = 1.0
+    moving_efficiency_factor: float = 1.0
+    forage_vision_factor: float = 1.0
 
     @property
     def vision(self) -> int:
-        return int(self.config.vision_radius)
+        return int(self.config.vision_radius * self.forage_vision_factor)
 
     def mutate_gradient_weight(self, rng) -> None:
         std = float(self.config.gradient_weight_std)
         self.gradient_weight = rng.normal(self.inherited_gradient_weight, std)
         self.gradient_weight = float(min(1.0, max(0.0, self.gradient_weight)))
+
+    def mutate_traits(self, rng) -> None:
+        """Mutate heritable traits with small random variations."""
+        std = 0.05  # 5% standard deviation
+        self.speed_factor = float(np.clip(rng.normal(self.speed_factor, std), 0.5, 1.5))
+        self.metabolism_factor = float(np.clip(rng.normal(self.metabolism_factor, std), 0.5, 1.5))
+        self.efficiency_factor = float(np.clip(rng.normal(self.efficiency_factor, std), 0.5, 1.5))
+        self.vision_factor = float(np.clip(rng.normal(self.vision_factor, std), 0.5, 1.5))
+        self.grazing_efficiency_factor = float(np.clip(rng.normal(self.grazing_efficiency_factor, std), 0.5, 1.5))
+        self.moving_efficiency_factor = float(np.clip(rng.normal(self.moving_efficiency_factor, std), 0.5, 1.5))
+        self.forage_vision_factor = float(np.clip(rng.normal(self.forage_vision_factor, std), 0.5, 1.5))
+        self.gradient_weight = rng.normal(self.inherited_gradient_weight, float(self.config.gradient_weight_std))
+        self.gradient_weight = float(min(1.0, max(0.0, self.gradient_weight)))
+        self.inherited_gradient_weight = self.gradient_weight
 
     def eat(self, env: HasResourceField, efficiency_scale: float = 1.0) -> float:
         """Resource consumption with exponential extraction decay.
@@ -268,7 +322,7 @@ class Prey(Entity):
             return 0.0
         # Exponential decay: 100% at ratio=1, 40% at ratio=0
         extraction = 0.4 + 0.6 * math.exp(-5.0 * (1.0 - ratio))
-        efficiency = max(float(self.config.min_efficiency), extraction) * efficiency_scale
+        efficiency = max(float(self.config.min_efficiency), extraction) * efficiency_scale * self.efficiency_factor
         taken = env.consume_resource(y, x, float(self.config.energy_from_resource) * efficiency)
         gained = self.add_energy(taken)
 
@@ -308,14 +362,38 @@ class Predator(Entity):
     investigate_y: Optional[int] = None
     investigate_x: Optional[int] = None
     investigate_timer: int = 0
+    # Heritable traits with mutation
+    chase_speed_factor: float = 1.0
+    hunt_efficiency_factor: float = 1.0
+    scent_factor: float = 1.0
+    vision_factor: float = 1.0
 
     @property
     def vision(self) -> int:
-        return int(self.config.chase_radius)
+        return int(self.config.chase_radius * self.vision_factor)
 
     @property
     def investigating(self) -> bool:
         return self.investigate_timer > 0
+
+    def begin_investigation(self, y: int, x: int, steps: int) -> None:
+        self.investigate_y = int(y)
+        self.investigate_x = int(x)
+        self.investigate_timer = int(steps)
+
+    def clear_investigation(self) -> None:
+        self.investigate_y = None
+        self.investigate_x = None
+        self.investigate_timer = 0
+
+    def mutate_traits(self, rng) -> None:
+        """Mutate heritable traits with small random variations."""
+        std = 0.05  # 5% standard deviation
+        self.speed_factor = float(np.clip(rng.normal(self.speed_factor, 0.05), 0.5, 1.5))
+        self.metabolism_factor = float(np.clip(rng.normal(self.metabolism_factor, 0.05), 0.5, 1.5))
+        self.chase_speed_factor = float(np.clip(rng.normal(self.chase_speed_factor, 0.05), 0.5, 1.5))
+        self.hunt_efficiency_factor = float(np.clip(rng.normal(self.hunt_efficiency_factor, 0.05), 0.5, 1.5))
+        self.scent_factor = float(np.clip(rng.normal(self.scent_factor, 0.05), 0.5, 1.5))
 
     def begin_investigation(self, y: int, x: int, steps: int) -> None:
         self.investigate_y = int(y)
