@@ -29,10 +29,13 @@ class PredatorBehaviorSystem:
         # Update wind: slowly shift direction and intensity
         self._update_wind()
 
-        # Reset the transient behaviour label; "feeding" only suppresses movement
-        # for the single step in which a predator actually drew on a carcass.
+        # Decrease eating timer for predators that are eating
         for predator in self.sim.predators:
-            predator.eating_state = "moving"
+            if predator.eating_timer > 0:
+                predator.eating_timer -= 1
+                predator.eating_state = "feeding"
+            else:
+                predator.eating_state = "moving"
 
         # Carcass feeding is resolved as one coordinated pass before any predator
         # moves, so that every predator around the same carcass competes for one
@@ -48,6 +51,11 @@ class PredatorBehaviorSystem:
             if was_alive and not predator.alive:
                 self.sim.counters.deaths_predator += 1
             if not predator.alive:
+                continue
+
+            # Skip if currently eating
+            if predator.eating_timer > 0:
+                predator.eating_state = "feeding"
                 continue
 
             # Feeding and killing are deliberately separate steps. A kill deposits
@@ -113,11 +121,17 @@ class PredatorBehaviorSystem:
                     break
 
     def _predator_kill_prey(self, predator) -> bool:
-        """Kill co-located prey and leave a carcass. No energy is transferred here."""
-        py, px = int(predator.y), int(predator.x)
+        """Kill co-located prey and leave a carcass. No energy is transferred here.
+        Only kills when hungry."""
+        # Only kill when hungry
         cfg = self.sim.config.predator
+        hungry = predator.energy < cfg.hunt_energy_threshold * predator.max_energy
+        if not hungry:
+            return False
+            
+        py, px = int(predator.y), int(predator.x)
         fraction = self.sim.config.carcass.carcass_energy_fraction
-
+        
         for flock, kind, kill_counter in (
             (self.sim.grazers, "grazer", "kills_grazer"),
             (self.sim.rabbits, "rabbit", "kills_rabbit"),
@@ -139,7 +153,11 @@ class PredatorBehaviorSystem:
                         config=self.sim.config.carcass,
                     )
                 )
-                predator.eating_state = "killing"
+                predator.eating_state = "feeding"
+                # Eating time based on prey's energy: (1/3) * max_energy + (2/3) * current_energy
+                eating_time = int((1.0/3.0) * prey.max_energy + (2.0/3.0) * prey.energy)
+                predator.eating_timer = max(1, eating_time)
+                predator.eating_state = "feeding"
                 return True
         return False
 
@@ -171,7 +189,9 @@ class PredatorBehaviorSystem:
             # Scent is stronger closer and further UPWIND (scent flows downwind FROM prey)
             # wind_x * dx + wind_y * dy is positive when prey is downwind of predator
             # We want higher strength when prey is UPWIND (negative dot product)
-            strength = (1.0 / dist) * (1.0 - wind_x * dx - wind_y * dy)
+            # Normalize dot product by distance to keep strength in valid range
+            dot = (wind_x * dx + wind_y * dy) / dist
+            strength = (1.0 / dist) * max(0.0, 1.0 - dot)
             grad_y += (ty - py) * strength / dist
             grad_x += (tx - px) * strength / dist
             found = True

@@ -240,7 +240,7 @@ predator:
   # Failed chases are what starved predators, not failed hunts: at 2.0 a
   # fruitless pursuit burned ~440 energy, over half a predator's body, while a
   # successful rabbit netted only ~70.
-  # Chase speed is move_speed * chase_speed_multiplier. Grazers flee at
+# Chase speed is move_speed * chase_speed_multiplier. Grazers flee at
   # 1 * 1.3 = 1.3 cells/step, so a chase multiplier of 1.4 keeps the
   # predator's top speed at ~1.1x the prey's flee speed: it can run
   # down a feeding grazer but not one that is already fleeing, which
@@ -250,7 +250,12 @@ predator:
   # Satiety system: predators only hunt when energy drops below this fraction
   # of max_energy. When satiated, they patrol toward high prey density areas.
   hunt_energy_threshold: 0.4
-  # When satiated, patrol toward areas with highest prey concentration
+  # When satiated, patrol toward areas with highest prey density
+  patrol_toward_prey: true
+  # Eating time: number of steps a predator spends eating after a kill.
+  # During this time the predator cannot move or hunt.
+  eating_time: 3
+  # When satiated, patrol toward areas with highest prey density
   patrol_toward_prey: true
   # Scent tracking
   scent_radius: 20

@@ -414,11 +414,15 @@ class Simulation:
         return int(self.rng.integers(0, int(cfg.reproduction_min_age) + 1))
 
     def _add_grazer(self, y: int | None = None, x: int | None = None) -> Grazer:
+
         cfg = self.config.grazer
+
         if y is None or x is None:
+
             y, x = self._spawn_location()
+
         weight = float(np.clip(self.rng.normal(cfg.gradient_weight, cfg.gradient_weight_std), 0.0, 1.0))
-        grazer = Grazer(
+        grazer = get_grazer_pool().acquire(
             x=float(x),
             y=float(y),
             energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
@@ -431,11 +435,15 @@ class Simulation:
         return grazer
 
     def _add_rabbit(self, y: int | None = None, x: int | None = None) -> Rabbit:
+
         cfg = self.config.rabbit
+
         if y is None or x is None:
+
             y, x = self._spawn_location()
+
         weight = float(np.clip(self.rng.normal(cfg.gradient_weight, cfg.gradient_weight_std), 0.0, 1.0))
-        rabbit = Rabbit(
+        rabbit = get_rabbit_pool().acquire(
             x=float(x),
             y=float(y),
             energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),
@@ -448,10 +456,14 @@ class Simulation:
         return rabbit
 
     def _add_predator(self, y: int | None = None, x: int | None = None) -> Predator:
+
         cfg = self.config.predator
+
         if y is None or x is None:
+
             y, x = self._spawn_location()
-        predator = Predator(
+
+        predator = get_predator_pool().acquire(
             x=float(x),
             y=float(y),
             energy=cfg.max_energy * float(self.rng.uniform(0.5, 1.0)),

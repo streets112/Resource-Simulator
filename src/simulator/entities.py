@@ -362,6 +362,7 @@ class Predator(Entity):
     investigate_y: Optional[int] = None
     investigate_x: Optional[int] = None
     investigate_timer: int = 0
+    eating_timer: int = 0
     # Heritable traits with mutation
     chase_speed_factor: float = 1.0
     hunt_efficiency_factor: float = 1.0
